@@ -22,6 +22,36 @@ const pct = (value) => `${Number(value ?? 0).toFixed(1)}%`;
 /** Resource filters for {@link assetTool}. */
 const ASSET_TYPES = ['vm', 'qemu', 'lxc', 'storage', 'node', 'all'];
 
+/** Sort keys accepted by `pve_cluster_assets.sort`. */
+const SORT_KEYS = ['vmid', 'name', 'status', 'node', 'cpu', 'mem', 'disk', 'uptime'];
+
+/**
+ * One comparable value per sort key. Entries of different types share a sort, so a missing key
+ * sorts low (-1 / "") instead of throwing: `sort:"mem"` over `type:"all"` must still answer.
+ */
+function sortValue(entry, key) {
+  switch (key) {
+    case 'vmid':
+      return Number(entry.vmid ?? -1);
+    case 'name':
+      return String(entry.name ?? entry.storage ?? '').toLowerCase();
+    case 'status':
+      return String(entry.status ?? '');
+    case 'node':
+      return String(entry.node ?? '');
+    case 'cpu':
+      return Number(entry.cpu_pct ?? entry.cpus ?? -1);
+    case 'mem':
+      return Number(entry.mem_used_bytes ?? entry.used_bytes ?? -1);
+    case 'disk':
+      return Number(entry.disk_used_bytes ?? entry.disk_total_bytes ?? entry.used_bytes ?? -1);
+    case 'uptime':
+      return Number(entry.uptime_s ?? -1);
+    default:
+      return 0;
+  }
+}
+
 export function clusterTools(deps) {
   return [
     defineTool({
@@ -210,8 +240,9 @@ export function clusterTools(deps) {
         'Inventory the cluster: VMs/containers, storage pools or nodes, with counts by node, type and status. ' +
         'Filter with `type` (vm, qemu, lxc, storage, node, all), `node`, `status` and a `name` substring. ' +
         'The reply is bounded (`limit`, default 40) and says how many were hidden, so a 300-VM cluster ' +
-        'does not flood the context. Use it to answer "what is on pve05", "which VMs are stopped", ' +
-        '"how much room is left".',
+        'does not flood the context; `sort`/`order` pick what surfaces first (biggest memory, oldest ' +
+        'uptime, node by node). Use it to answer "what is on pve05", "which VMs are stopped", ' +
+        '"how much room is left", "which VM is eating memory".',
       parameters: {
         node: NODE_PARAM,
         on: {
@@ -237,6 +268,20 @@ export function clusterTools(deps) {
           type: 'number',
           description: 'How many entries to return, 1…200 (default 40). The counts cover everything.',
         },
+        sort: {
+          type: 'string',
+          enum: ['vmid', 'name', 'status', 'node', 'cpu', 'mem', 'disk', 'uptime'],
+          default: 'vmid',
+          description:
+            'What orders `items` (counts are unaffected). cpu/mem/disk use the used values for VMs and ' +
+            'nodes, the used bytes of a storage pool for storage.',
+        },
+        order: {
+          type: 'string',
+          enum: ['asc', 'desc'],
+          default: 'asc',
+          description: 'Ascending or descending. sort:"mem", order:"desc" = biggest memory first.',
+        },
         fresh: { type: 'boolean', description: 'Ignore the cached inventory and read the cluster again.' },
       },
       output: {
@@ -246,6 +291,8 @@ export function clusterTools(deps) {
           total: { type: 'number', description: 'Entries matching the filters, before `limit`.' },
           shown: { type: 'number', description: 'Entries in `items`.' },
           truncated: { type: 'boolean', description: '`limit` hid entries; raise it or narrow the filters.' },
+          sort: { type: 'string', description: 'Order applied to `items`.' },
+          order: { type: 'string', description: 'asc or desc.' },
           counts: {
             type: 'object',
             properties: {},
@@ -272,7 +319,8 @@ export function clusterTools(deps) {
           lines.push(
             `${value.shown ?? 0} of ${value.total ?? 0} entries` +
               (byStatus ? ` (${byStatus})` : '') +
-              (value.cluster ? ` in ${value.cluster}` : ''),
+              (value.cluster ? ` in ${value.cluster}` : '') +
+              (value.sort && value.sort !== 'vmid' ? `, sorted by ${value.sort} ${value.order ?? 'asc'}` : ''),
           );
           for (const item of value.items ?? []) {
             if (item.type === 'storage') {
@@ -358,9 +406,19 @@ export function clusterTools(deps) {
           byStatus[status] = (byStatus[status] ?? 0) + 1;
           if (entry.node) byNode[entry.node] = (byNode[entry.node] ?? 0) + 1;
         }
+        const sortKey = SORT_KEYS.includes(String(args.sort ?? 'vmid')) ? String(args.sort ?? 'vmid') : 'vmid';
+        const descending = String(args.order ?? 'asc') === 'desc';
         const items = matching
           .slice()
-          .sort((a, b) => String(a.node ?? '').localeCompare(String(b.node ?? '')) || (a.vmid ?? 0) - (b.vmid ?? 0))
+          .sort((a, b) => {
+            const left = sortValue(a, sortKey);
+            const right = sortValue(b, sortKey);
+            const base =
+              typeof left === 'number' && typeof right === 'number'
+                ? left - right
+                : String(left).localeCompare(String(right));
+            return descending ? -base : base;
+          })
           .slice(0, limit);
         return {
           ok: true,
@@ -369,6 +427,8 @@ export function clusterTools(deps) {
           total: matching.length,
           shown: items.length,
           ...(matching.length > items.length ? { truncated: true } : {}),
+          sort: sortKey,
+          order: descending ? 'desc' : 'asc',
           counts: { by_type: byType, by_status: byStatus, by_node: byNode },
           items,
           wall_ms: Date.now() - started,

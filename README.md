@@ -60,7 +60,7 @@ Every tool returns `{ok:false, code, message, hint, details?}` instead of throwi
 
 ## Things worth knowing before you use it
 
-- **Lists are bounded.** `pve_vm_status` prints at most 25 VMs (running first) plus `… and N more`; `pve_cluster_assets` defaults to 40 rows with full `counts`; a 276-VM cluster will not flood the context.
+- **Lists are bounded.** `pve_vm_status` prints at most 25 VMs (running first) plus `… and N more`; `pve_cluster_assets` defaults to 40 rows with full `counts`; a 276-VM cluster will not flood the context. `sort`/`order` are applied before the cut, so `{sort:"mem", order:"desc", limit:5}` really is the five biggest.
 - **`node` is the seed, `on` is the filter.** `pve_cluster_assets {node:"192.168.90.104", on:"pve04"}` asks pve04's address for the entries that live on pve04.
 - **Two sessions, two channels.** `pve_guest_exec` runs in session 0 (SYSTEM); click/type/key run in the interactive session 1. SendKeys from `pve_guest_exec` shows nothing on screen, and the input tools cannot run unattended scripts.
 - **`pve_snapshot` stops the VM first** (`qm rollback` needs it stopped), so `agent_up_ms` measures rollback + cold boot + agent readiness: 40–90 s.
@@ -72,6 +72,7 @@ Every tool returns `{ok:false, code, message, hint, details?}` instead of throwi
 ## Docs
 
 - [docs/DETAIL.md](docs/DETAIL.md) — capabilities, the cluster connection model, all 21 settings, tool table, error code table, known limits, mapping to the `prototype/pve` scripts this grew from.
+- `npm test` — cluster parsing and `clusterMode` behaviour against a fixture captured from a real cluster (`dev/test-cluster.mjs`); `npm run test:wire` checks the 11 tool definitions load.
 - [docs/SELFTEST.md](docs/SELFTEST.md) — every acceptance check with the command that was actually run and its result, including the real bugs found along the way.
 
 ## License

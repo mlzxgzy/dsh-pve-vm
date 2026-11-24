@@ -89,7 +89,7 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 | 工具 | 主要参数 | 返回 |
 | --- | --- | --- |
 | `pve_cluster_status` | `node?`, `fresh?` | `cluster,quorate,standalone,expected_votes,votes,config_version,transport,source,seed,seed_node,hosts,node_count,online_count,vms_total,vms_running,storage_total,listed_nodes,nodes[],wall_ms` |
-| `pve_cluster_assets` | `node?`(种子), `on?`(节点名), `type?`, `status?`, `name?`, `limit=40`, `fresh?` | `cluster,source,total,shown,truncated,counts{by_type,by_status,by_node},items[],wall_ms` |
+| `pve_cluster_assets` | `node?`(种子), `on?`(节点名), `type?`, `status?`, `name?`, `limit=40`, `sort=vmid`, `order=asc`, `fresh?` | `cluster,source,total,shown,truncated,sort,order,counts{by_type,by_status,by_node},items[],wall_ms` |
 | `pve_vm_status` | `vmid?`, `node?`, `fresh?` | `vmid,host,node,status,agent,agent_ms,source,burst,frames,cluster,quorate,nodes_online,nodes_total,hosts,vms,picked,vm_total,vms_truncated,running_count,wall_ms` |
 | `pve_snapshot` | `vmid?`, `node?`, `snapshot=init`, `confirm`（必填 true） | `snapshot,previous_status,rollback_ms,stop_ms,start_ms,agent_up_ms` |
 | `pve_screenshot` | `vmid?`, `node?`, `name?`, `format?`, `quality?`, `inline?`, `wake?`, `wakeX?`, `wakeY?` | `path,bytes,w,h,format,encoder,blank,woke,ms,wall_ms[,data,encoding,inline_skipped]` |
@@ -103,6 +103,7 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 几个刻意为之的行为：
 
 - **先问集群，再问机器**：`pve_cluster_status` / `pve_cluster_assets` 一次 ssh 回答"这个集群有什么"，`pve_vm_status` 传 `vmid` 时把它解析到属主节点再操作。`pve_cluster_assets` 的 `node` 只当种子，**按节点名过滤要用 `on`**（首版把两者混成一个参数，`{node:"192.168.90.104",status:"running"}` 会返回 `0 of 0`）。
+- **排序是服务端做的**：`pve_cluster_assets {sort:"mem", order:"desc"}` 先排序再截断，所以 `limit:5` 拿到的一定是最大的 5 个，不是"前 5 个里最大的"。`sort` 支持 `vmid/name/status/node/cpu/mem/disk/uptime`；cpu/mem/disk 对 VM 和节点用 used 值，对存储池用 used bytes。
 - **列表一律有界**：`pve_vm_status` 最多列 25 台（running 优先）并给出 `… and N more VMs`；`pve_cluster_assets` 默认 40 条、`limit` 上限 200，`counts` 始终是全量统计；`pve_cluster_status` 最多 40 行节点。276 台的集群不会把上下文刷满。
 - **`pve_screenshot` 只给路径和字节数**，不塞 base64。`inline:true` 且小于 200 KB 时才附图片，否则返回 `inline_skipped`。
 - **`wake:true` 会把黑屏点醒**：截图后判 `blank`（全黑或纯色），若是黑屏就经 session-1 桥在 `(wakeX??1150, wakeY??620)` 点一次、等 900 ms 再截，结果里 `blank:true, woke:true`，可读输出也会写明这两句。默认关——它会在桌面上留下一次点击。
@@ -120,6 +121,7 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 | --- | --- | --- |
 | `NODE_NOT_CONFIGURED` | 既没有 `hosts`、`PVE_HOSTS`，调用也没带 `node` | 三者任选其一 |
 | `NODE_UNREACHABLE` | ssh 连不上（VPN 断了最常见） | 检查 VPN；`ssh -o ConnectTimeout=5 root@<node> true` |
+| `NOT_A_CLUSTER` | `clusterMode:"on"`，但节点上没有 `/etc/pve/.members` | 改 `auto`/`off`，或指向真正的集群节点 |
 | `AMBIGUOUS_VMID` | 多台 VM 在 running，无法自动挑 | 传 `vmid`；候选在 `details.vms` |
 | `VM_NOT_FOUND` | 集群/候选节点上都没有这台 VM | 看 `details.hosts` 的 `qm status` 回显 |
 | `VMID_NOT_ALLOWED` / `BAD_VMID` | 被 `allowedVmids` 限制，或不是正整数 | 空列表 = 不限制 |
@@ -151,7 +153,7 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 2. **guest 执行在 session 0（SYSTEM），点击/输入在 session 1（Administrator）。** 两套通道不能混用：`pve_guest_exec` 里调 SendKeys 或桌面 API 什么也看不到；`pve_click`/`pve_type` 想跑无人值守脚本也不行（会话切换用不了）。这就是为什么 `pve_type`/`pve_key` 每次要 2–4 s——它们要经计划任务把脚本投进交互会话。
 3. **`pve_snapshot` 会先停 VM**（`qm rollback` 在 running 状态不成立），所以 `agent_up_ms` 是"回滚 + 冷启动 + agent 就绪"的合计量，实测 40–90 s 量级，不是 30 s。等 agent 用 **exit code** 判定，不 grep 文本——本版 PVE 的 `qm agent ping` 成功时没有输出。
 4. **集群快照是缓存过的**（`clusterCacheMs`，默认 15 s）。刚建的 VM 可能不在快照里，`fresh:true` 才会重读。写操作（迁移、创建、销毁）本插件不做。
-5. **集群视图依赖 `pvesh` 与 `/etc/pve/.members` 可读**（即 ssh 用户能读 `pve-cluster` 目录，root 可以）。两者都拿不到时 `clusterMode:"on"` 会报错，`auto` 会安静退回逐主机 `qm list`（此时元信息只剩 ssh 能直连的那几台）。
+5. **集群视图依赖 `pvesh` 与 `/etc/pve/.members` 可读**（即 ssh 用户能读 `pve-cluster` 目录，root 可以）。`clusterMode:"on"` 时读不到集群文件会直接报 `NOT_A_CLUSTER`（而不是悄悄降级）；`auto` 会安静退回逐主机 `qm list`。单机节点在 `auto` 下仍可用：快照里那台合成为 `ip: null` 的节点，地址回退成你连它用的那个 `node`。**standalone 只用夹具验证过**——本网络 7 台 PVE 全在同一个集群里，没有真单机可测；该分支、`NOT_A_CLUSTER` 与地址回退由 `dev/test-cluster.mjs` 用真实 `.members`/`pvesh` 输出做夹具验证（33 项断言）。
 6. **节点名不能被解析**：`node` 参数写 `pve04` 时用的是用户自己的 ssh 配置；写地址（`192.168.90.104`）最稳。集群解析出的属主地址一律来自 `.members` 的 `ip`。
 7. **QMP 帧不含鼠标指针。** 需要看指针位置时，用 guest 内查询（`[Cursor]::Position`，屏幕坐标）。
 8. **连拍的帧在节点 tmpfs 上**，节点重启或换节点就没了；插件不做跨节点同步。

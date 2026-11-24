@@ -1,0 +1,66 @@
+###HOST
+pve04
+###MEMBERS
+{
+"nodename": "pve04",
+"version": 17,
+"cluster": { "name": "pve-cluster-02", "version": 13, "nodes": 7, "quorate": 1 },
+"nodelist": {
+  "pve06": { "id": 7, "online": 1, "ip": "192.168.90.106"},
+  "pve01": { "id": 1, "online": 1, "ip": "192.168.90.101"},
+  "pve02": { "id": 2, "online": 1, "ip": "192.168.90.102"},
+  "pve03": { "id": 4, "online": 1, "ip": "192.168.90.103"},
+  "pve05": { "id": 6, "online": 1, "ip": "192.168.90.105"},
+  "pve07": { "id": 3, "online": 1, "ip": "192.168.90.107"},
+  "pve04": { "id": 5, "online": 1, "ip": "192.168.90.104"}
+  }
+}
+###PVECM
+Cluster information
+-------------------
+Name:             pve-cluster-02
+Config Version:   13
+Transport:        knet
+Secure auth:      on
+
+Quorum information
+------------------
+Date:             Tue Nov 24 15:36:41 2026
+Quorum provider:  corosync_votequorum
+Nodes:            7
+Node ID:          0x00000005
+Ring ID:          1.383
+Quorate:          Yes
+
+Votequorum information
+----------------------
+Expected votes:   7
+Highest expected: 7
+Total votes:      7
+Quorum:           4  
+Flags:            Quorate 
+
+Membership information
+----------------------
+    Nodeid      Votes Name
+0x00000001          1 192.168.18.101
+0x00000002          1 192.168.18.102
+0x00000003          1 192.168.18.107
+0x00000004          1 192.168.18.103
+0x00000005          1 192.168.18.104 (local)
+0x00000006          1 192.168.18.105
+0x00000007          1 192.168.18.106
+###PVECMNODES
+
+Membership information
+----------------------
+    Nodeid      Votes Name
+         1          1 pve01
+         2          1 pve02
+         3          1 pve07
+         4          1 pve03
+         5          1 pve04 (local)
+         6          1 pve05
+         7          1 pve06
+###RESOURCES
+[{"cgroup-mode": 2, "cpu": 0.11501563293338, "disk": 82595823616, "id": "node/pve07", "level": "", "maxcpu": 80, "maxdisk": 100861726720, "maxmem": 642108502016, "mem": 201362071552, "node": "pve07", "status": "online", "type": "node", "uptime": 27316870}, {"cgroup-mode": 2, "cpu": 0.0021291986842644, "disk": 22779854848, "id": "node/pve04", "level": "", "maxcpu": 80, "maxdisk": 100861726720, "maxmem": 810172940288, "mem": 22358749184, "node": "pve04", "status": "online", "type": "node", "uptime": 68782048}, {"cgroup-mode": 2, "cpu": 0.00922853842561872, "disk": 387336835072, "id": "node/pve01", "level": "", "maxcpu": 80, "maxdisk": 2352555520000, "maxmem": 810165788672, "mem": 93442187264, "node": "pve01", "status": "online", "type": "node", "uptime": 68782156}, {"cpu": 0.00109916489322969, "disk": 0, "diskread": 382461086, "diskwrite": 12706947072, "id": "qemu/1001", "maxcpu": 8, "maxdisk": 34359738368, "maxmem": 8589934592, "mem": 997699584, "name": "srv-websockify-c2-11", "netin": 121514628741, "netout": 77267708132, "node": "pve01", "status": "running", "template": 0, "type": "qemu", "uptime": 67054415, "vmid": 1001}, {"cpu": 0.00600068714034124, "disk": 0, "diskread": 1521478144, "diskwrite": 720120320, "id": "qemu/15047", "maxcpu": 4, "maxdisk": 64424509440, "maxmem": 4294967296, "mem": 978350080, "name": "Copy-of-VM-template-1x-qywlaqfh-zhongji-1.1.2-winsrv2016", "netin": 0, "netout": 0, "node": "pve04", "status": "running", "template": 0, "type": "qemu", "uptime": 3615, "vmid": 15047}]

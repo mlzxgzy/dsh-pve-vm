@@ -60,7 +60,7 @@ PVE_HOSTS=pve04,192.168.90.101        # 环境变量
 
 ## 用之前值得知道的几件事
 
-- **列表都有界。** `pve_vm_status` 最多列 25 台（running 优先）再加一句 `… and N more`；`pve_cluster_assets` 默认 40 条但 `counts` 是全量；276 台的集群不会把上下文刷满。
+- **列表都有界。** `pve_vm_status` 最多列 25 台（running 优先）再加一句 `… and N more`；`pve_cluster_assets` 默认 40 条但 `counts` 是全量；276 台的集群不会把上下文刷满。`sort`/`order` 先排序再截断，所以 `{sort:"mem", order:"desc", limit:5}` 真的是最大的 5 个。
 - **`node` 是种子，`on` 是过滤。** `pve_cluster_assets {node:"192.168.90.104", on:"pve04"}` = 找 pve04 的地址问、只要 pve04 上的东西。
 - **两个会话，两条通道。** `pve_guest_exec` 在 session 0（SYSTEM）；点击/输入/按键在交互 session 1。在 `pve_guest_exec` 里调 SendKeys 屏幕上什么都不会发生，输入类工具也跑不了无人值守脚本。
 - **`pve_snapshot` 会先把 VM 停掉**（`qm rollback` 要求停机），所以 `agent_up_ms` 是"回滚 + 冷启动 + agent 就绪"的合计量：40–90 s。
@@ -72,6 +72,7 @@ PVE_HOSTS=pve04,192.168.90.101        # 环境变量
 ## 文档
 
 - [docs/DETAIL.md](docs/DETAIL.md) — 能力、集群连接模型、21 项配置、工具表、错误码表、已知限制、以及和 `prototype/pve` 脚本的对应关系。
+- `npm test` — 用真实集群采样做夹具，验证集群解析与 `clusterMode` 三档行为（`dev/test-cluster.mjs`）；`npm run test:wire` 检查 11 个工具定义可加载。
 - [docs/SELFTEST.md](docs/SELFTEST.md) — 每条验收实际跑过的命令与结果，包含过程中发现的真 bug。
 
 ## 许可

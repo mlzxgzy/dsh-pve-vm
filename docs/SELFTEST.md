@@ -243,3 +243,25 @@ profile 里**已经装了第三方 `dsh-pve-vm@0.2.5`**（`console_*`/`vm_*` 那
 - 集群不可读（`/etc/pve` 无权限）时 `auto` 回退的真实行为（只做了代码路径，没有真降权实测）。
 - `pvesh` 不可用（被裁剪的 PVE 安装）时的降级。
 - 快照工具的集群化：`pve_snapshot` 仍按"属主节点"操作，未测**回滚后迁移**（`qm rollback` 不需要集群写接口，但迁移后再回滚未试）。
+
+## v1.2.1：资产排序、`clusterMode:"on"` 的拒识路径、独立的集群自测
+
+| # | 项目 | 命令 / 方式 | 实测结果 | 判定 |
+| --- | --- | --- | --- | --- |
+| C10 | 资产排序（先排后截） | `pve_cluster_assets {node:"192.168.90.104", type:"vm", sort:"mem", order:"desc", limit:6}` | 输出头 `6 of 276 entries (176 stopped, 100 running) in pve-cluster-02, sorted by mem desc`，前 6 台为 250205/250204（16 cpus, mem 32.0 GB, pve06）、2017（pve07）、9041/9042/9043（pve05）——确实是全集群内存最大的 6 台，不是"前 6 里最大的" | 通过 |
+| C11 | 夹具自测（真实采样） | `npm test` → `dev/test-cluster.mjs`，夹具 `dev/fixtures/cluster-real.txt`（pve04 上的 `hostname` + `/etc/pve/.members` + `pvecm status` + `pvecm nodes` + 裁剪后的 `pvesh /cluster/resources`） | 33 项断言全过：集群名/quorate/版本、7 个 `nodename→ip`、expected votes 7、knet、每节点 1 票、`findVmid(15047)→pve04`、`addressOf("pve01")=192.168.90.101`、`addressOf("pve04")` 回退种子地址 | 通过 |
+| C12 | `clusterMode:"on"` 遇非集群节点 | 夹具：`###MEMBERS` 为空段 + 资源 1 台 VM，`settings.clusterMode="on"` | 抛 `NOT_A_CLUSTER`，message `clusterMode is "on" but 192.168.90.104 is not part of a cluster`，`details.hosts` 带该 host，`toValue().ok === false` | 通过 |
+| C13 | `clusterMode:"auto"` 遇非集群节点 | 同一夹具，`auto` | 快照 `standalone: true`、单节点 `ip: null`，`addressOf` 回退成种子 `192.168.90.104`，`findVmid(15047)` 仍命中；`NodeRegistry.resolve(15047)` 返回 `{host:"192.168.90.104", source:"cluster"}` | 通过 |
+| C14 | `clusterMode:"off"` 不读集群 | 同一夹具的 transport，`off` | 断言 transport 从未收到含 `###HOST` 的脚本（1 次调用，走 `qm list`） | 通过 |
+| C15 | 工具定义仍可加载 | `npm run test:wire` | `expected 11 tools: true` / `WIRING OK` | 通过 |
+
+本轮修掉的两个真 bug：
+
+1. **`addressOf` 对没有 ip 的节点返回 null** → standalone 节点（`.members` 缺失时合成的 `ip: null` 节点）会解析不出地址，`resolve` 只能退回逐主机探测。修法：`addressOf` 在该节点就是种子节点时回退 `snapshot.seed.host`（C13 覆盖）。
+2. **`clusterMode:"on"` 对单机节点会"成功"**（返回 `standalone: true` 的快照），等于配置写成"必须是集群"却悄悄降级。修法：`ensure()` 在 `required && members.cluster === null` 时收集该 host 为失败，全部失败且都是 `notCluster` 时抛 `NOT_A_CLUSTER`（新增错误码与 hint）。
+
+### v1.2.1 仍未验证
+
+- 真单机 PVE 节点（本网络 7 台全在同一集群）；standalone 仅夹具覆盖。
+- `/etc/pve` 无权限（非 root ssh 用户）时的 `auto` 回退真实行为。
+- `pvesh` 被裁剪的安装。
