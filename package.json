@@ -1,0 +1,52 @@
+{
+  "name": "pve-vm-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Proxmox VE VM recorder: host-side QMP screenshots, burst capture, frame fetch, session-1 click/type, guest PowerShell, snapshot rollback.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "proxmox",
+    "pve",
+    "qmp",
+    "recording",
+    "computer-use"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "tools",
+    "locale",
+    "docs",
+    "icon.svg",
+    "cordis.patch.yml"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check lib/bridge.js && node --check lib/burst.js && node --check lib/config.js && node --check lib/errors.js && node --check lib/frames.js && node --check lib/guest.js && node --check lib/img.js && node --check lib/nodes.js && node --check lib/qmp.js && node --check lib/ssh.js && node --check lib/stream.js && node --check lib/actions.js && node --check lib/audit.js && node --check tools/common.js && node --check tools/vm.js && node --check tools/screen.js && node --check tools/input.js && node --check tools/guest.js",
+    "smoke": "node dev/smoke.mjs status"
+  }
+}

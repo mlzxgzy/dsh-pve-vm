@@ -1,0 +1,5 @@
+node_modules/
+.smoke/
+pve-rec/
+*.log
+.DS_Store
