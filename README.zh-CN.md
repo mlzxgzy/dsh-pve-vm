@@ -1,71 +1,79 @@
-# pve-vm-recorder
+# dsh-pve-vm
 
 [English](README.md) | **简体中文**
 
-一个 DeepSeek Harness (DSH) 插件：让 agent **看见并操作一台 Proxmox VE 虚拟机** —— 截图、连拍录制、取帧、点击、输入文字、按键、在 guest 里跑 PowerShell、回滚快照 —— 全程不用手写一条 `ssh` 命令。
+一个 DeepSeek Harness（DSH）插件：让 agent **操作 Proxmox VE 集群**——先盘点集群与资产，再看屏幕、动鼠标键盘：截图、连拍、取帧、点击、输入、按键、guest 内 PowerShell、回滚快照，全程不用手写一条 `ssh`。
 
-为"agent 必须看着 Windows 虚拟机的屏幕动手"这个场景而写：每一处设计都在守三件事 —— **返回值有界、失败能自解释、动作可撤销**。
+PVE 里的"一台机器"其实是"一个集群"，所以连接的单位就是集群：一次 `ssh` 拿到 节点名 → 管理地址 的映射、quorate、每台 VM、每个存储池。主机和 VMID 都**不写死**。
 
 ```
-pve_vm_status      这台 VM 在哪、guest agent 活着没有、有没有录制在跑
-pve_screenshot     宿主侧 QMP 取一帧 → 本地 JPEG，只回路径和字节（默认绝不给 base64）
-pve_burst          后台按 N fps 连拍进节点 tmpfs，到点自己停
-pve_fetch_frames   按序号区间把帧拉回本地并转码，附带真实帧间隔
-pve_click          在屏幕坐标点点一下（14 步平滑移动，不是瞬移）
-pve_type           发文字（SendKeys，特殊字符已转义）
-pve_key            按一个键或组合键（ctrl+a、alt+f4、f5 …）
-pve_guest_exec     经 QEMU guest agent 在 guest 里跑 PowerShell
-pve_snapshot       回滚到某个快照、重启、并等 guest agent 就绪
+pve_cluster_status  仲裁状态、每节点 cpu/内存/VM 数、集群合计——一次 ssh
+pve_cluster_assets  按节点/类型/状态/名字过滤 节点、VM、存储，输出有界
+pve_vm_status     VM 在哪台节点、guest agent 活着没、有没有连拍在跑
+pve_screenshot    宿主 QMP 取帧 → 本地 JPEG，只给路径和字节数（默认不给 base64）
+pve_burst         后台连拍 N fps，帧写节点 tmpfs，自带时长上限
+pve_fetch_frames  按区间取回并转码，附真实帧间隔
+pve_click         按屏幕坐标点击（14 步平滑移动）
+pve_type          发文本（SendKeys，已转义）
+pve_key           按一个键或组合键（ctrl+a、alt+f4、f5…）
+pve_guest_exec    经 QEMU guest agent 在 guest 内跑 PowerShell
+pve_snapshot      回滚到快照、重启、等 agent 就绪
 ```
 
-## 什么都不写死
+## 没有写死任何东西
 
-包里没有任何集群地址、VMID 或快照名。
+包里不含集群地址、节点名、VMID、快照名。
 
-| 要确定的东西 | 怎么确定 |
+| 要回答的事 | 怎么解析 |
 | --- | --- |
-| 用哪台宿主 | 调用时给 `node:"pve04"`（ssh 别名**或**地址），否则 `PVE_HOSTS`，否则 settings 的 `hosts` |
-| VM 属于哪个节点 | 调用当下对每个候选宿主跑 `qm status` —— 迁移过的 VM 是"查到"的，不是"假设"的 |
-| 操作哪台 VM | `vmid`，否则 `defaultVmid`，否则**唯一在跑**的那台；多台在跑则失败并返回 `AMBIGUOUS_VMID` 与候选列表 |
-| 允许碰哪些 VM | `allowedVmids` 是**可选**限制，留空 = 不限制 |
+| 从哪台机器问 | 调用参数 `node:"pve04"`（**ssh 别名或地址**），否则 `PVE_HOSTS`，否则设置里的 `hosts` |
+| 集群是什么样 | 读 `/etc/pve/.members` + `pvecm` + `pvesh get /cluster/resources`，一次取全量，缓存 15 s |
+| 节点名 → 地址 | `.members` 里的 `ip`（`pve04` 在 DNS 里解析不了，`ssh root@pve04` 直接失败） |
+| VM 属于哪台节点 | 集群清单；拿不到就逐候选跑 `qm status`——迁移过的 VM 是查出来的，不是猜的 |
+| 操作哪台 VM | `vmid`，否则 `defaultVmid`，否则集群里**唯一 running** 的那台；多台在跑就报 `AMBIGUOUS_VMID` 并列出候选 |
+| 允许碰哪些 | `allowedVmids` 是**可选**限制（空 = 不限制） |
+
+`clusterMode` 决定依赖多硬：`auto`（默认，先试集群，失败退回逐主机 `qm list`）、`on`（必须是集群）、`off`（从不读集群）。集群侧**只读**：不创建、不迁移、不销毁。
 
 ## 安装
 
 ```bash
-plugin_manager install_bundle target=/abs/path/to/pve-vm-recorder
-# 或者：Settings → Plugins → Add plugin → 选这个目录
+plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
+# 或：Settings → Plugins → Add plugin → 选这个目录
 ```
 
-随包的 `cordis.patch.yml` 插入条目时**不带任何 config**，所以装完什么都不会发生，直到你告诉它要操作哪台机器：
+随包的 `cordis.patch.yml` **不写 config**，所以装完什么也不会发生，直到你告诉它连哪台：
 
 ```bash
 PVE_HOSTS=pve04,192.168.90.101        # 环境变量
-# 或 settings: hosts: ["pve04"]
-# 或每次调用:  pve_vm_status {node: "pve04"}
+# 或设置：hosts: ["pve04"]
+# 或每次调用：pve_cluster_status {node: "pve04"}
 ```
 
-前置条件：能 ssh 到 PVE 节点（默认 root）、VM 处于运行状态；`pve_click`/`pve_type`/`pve_key` 还要求 guest 里有已登录的控制台会话（Windows 是 session 1）。
+需要：能 ssh 到一台 PVE 节点（默认 root）、有一台 running 的 VM；输入类工具还要求控制台会话已登录（Windows 是 session 1）。
 
 ## 失败长什么样
 
-每个工具都返回 `{ok:false, code, message, hint, details?}` 而不是抛异常。常见码：`NODE_NOT_CONFIGURED`、`NODE_UNREACHABLE`（VPN 断了——8 秒返回，不是卡住）、`AMBIGUOUS_VMID`、`QMP_BUSY`、`AGENT_DOWN`、`VM_STOPPED`、`SNAPSHOT_CONFIRM_REQUIRED`、`BRIDGE_TIMEOUT`。
+所有工具都返回 `{ok:false, code, message, hint, details?}`，不抛裸异常。常见码：`NODE_NOT_CONFIGURED`、`NODE_UNREACHABLE`（VPN 断了——8 s 返回，不是卡住）、`AMBIGUOUS_VMID`、`QMP_BUSY`、`AGENT_DOWN`、`VM_STOPPED`、`SNAPSHOT_CONFIRM_REQUIRED`、`BRIDGE_TIMEOUT`。
 
-连拍期间的 `QMP_BUSY` 是**策略**不是物理必然：录制器每帧单独连一次 QMP，帧与帧之间 socket 是空的；工具仍然拒绝，只为让"不抢 socket"这件事是确定性的。
+连拍期间的 `QMP_BUSY` 是**策略**，不是物理必然：录制器每帧连一次 QMP 就关，帧之间 socket 是空闲的；工具层仍然拒绝，是为了让"别抢 socket"这件事确定。
 
-## 上手前必须知道的几件事
+## 用之前值得知道的几件事
 
-- **两个会话，两条通道。** `pve_guest_exec` 跑在 session 0（SYSTEM）；点击/输入/按键跑在交互 session 1。在 `pve_guest_exec` 里发 SendKeys 屏幕上什么都不会出现，而输入类工具也跑不了无人值守脚本。
-- **`pve_snapshot` 会先把 VM 停掉**（`qm rollback` 要求停机），所以 `agent_up_ms` 量的是"回滚 + 冷启动 + agent 就绪"：40–90 秒。
-- **刚回滚或刚开机的 guest 可能什么都不画**：第一帧纯黑（约 12 KB），要有一次真实输入之后桌面才出来。`pve_screenshot {wake:true}` 会识别黑帧并自动点一下。
-- **QMP 帧里没有鼠标指针。**
-- **一次点击不等于翻一页。** 注入的事件会被批量消费；每次动作后都用截图确认。
-- **坐标是屏幕坐标**，不是窗口相对坐标。1280×800 下开始按钮中心约在 (22, 783)。
+- **列表都有界。** `pve_vm_status` 最多列 25 台（running 优先）再加一句 `… and N more`；`pve_cluster_assets` 默认 40 条但 `counts` 是全量；276 台的集群不会把上下文刷满。
+- **`node` 是种子，`on` 是过滤。** `pve_cluster_assets {node:"192.168.90.104", on:"pve04"}` = 找 pve04 的地址问、只要 pve04 上的东西。
+- **两个会话，两条通道。** `pve_guest_exec` 在 session 0（SYSTEM）；点击/输入/按键在交互 session 1。在 `pve_guest_exec` 里调 SendKeys 屏幕上什么都不会发生，输入类工具也跑不了无人值守脚本。
+- **`pve_snapshot` 会先把 VM 停掉**（`qm rollback` 要求停机），所以 `agent_up_ms` 是"回滚 + 冷启动 + agent 就绪"的合计量：40–90 s。
+- **刚回滚或刚冷启动的 guest 可能什么都不绘制**：第一帧是纯黑（约 12 KB），一次真实输入之后桌面才出现。`pve_screenshot {wake:true}` 会检测并点一次。
+- **QMP 帧不含鼠标指针。**
+- **一次点击不等于前进一页。** 注入事件会被批量消费，动作之后一定要截图确认。
+- **坐标是屏幕坐标**，不是窗口相对坐标。1280×800 下任务栏"开始"按钮中心约 **(22, 783)**。
 
 ## 文档
 
-- [docs/DETAIL.md](docs/DETAIL.md) —— 能力与边界、19 项配置、工具表、错误码表、已知限制、与 `prototype/pve` 脚本的对应关系。
-- [docs/SELFTEST.md](docs/SELFTEST.md) —— 每条验收都记了实际跑的命令和结果，包括过程中挖出的两个真 bug。
+- [docs/DETAIL.md](docs/DETAIL.md) — 能力、集群连接模型、21 项配置、工具表、错误码表、已知限制、以及和 `prototype/pve` 脚本的对应关系。
+- [docs/SELFTEST.md](docs/SELFTEST.md) — 每条验收实际跑过的命令与结果，包含过程中发现的真 bug。
 
-## 许可证
+## 许可
 
 MIT

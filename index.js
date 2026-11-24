@@ -1,5 +1,5 @@
 /**
- * pve-vm-recorder — observe and drive a Proxmox VM without leaving the agent.
+ * dsh-pve-vm — observe and drive a Proxmox VE cluster without leaving the agent.
  *
  * The plugin wraps the prototype in `prototype/pve/`: QMP screendumps from the node (not the guest
  * desktop), a detached frame recorder on the node tmpfs, the session-1 bridge for injected input,
@@ -8,12 +8,14 @@
  * Wiring only: settings are read at call time (the operator may change them without a reload), and
  * one shared ssh transport / node registry / bridge is reused so caches survive between calls.
  */
+import { Cluster } from './lib/cluster.js';
 import { resolveSettings, snapshot, Config } from './lib/config.js';
 import { guard } from './lib/errors.js';
 import { NodeRegistry } from './lib/nodes.js';
 import { Transport } from './lib/ssh.js';
 import { SessionBridge } from './lib/bridge.js';
 import { burstStatus, stopBurst } from './lib/burst.js';
+import { clusterTools } from './tools/cluster.js';
 import { lifecycleTools } from './tools/vm.js';
 import { screenTools } from './tools/screen.js';
 import { inputTools } from './tools/input.js';
@@ -21,7 +23,7 @@ import { guestTools } from './tools/guest.js';
 
 export { Config };
 
-export const name = 'pve-vm-recorder';
+export const name = 'dsh-pve-vm';
 
 export const inject = ['tools', 'subprocess'];
 
@@ -35,12 +37,16 @@ export function apply(ctx, config) {
   const spawn = (spec) => ctx.subprocess.spawn(spec);
   const cwd = process.cwd();
   const transport = new Transport({ settings, spawn, cwd });
-  const registry = new NodeRegistry({ settings, transport });
+  // One cluster view is shared by every tool: it is read at call time, cached for
+  // `clusterCacheMs`, and gives VM→node→address resolution without probing every host.
+  const cluster = new Cluster({ settings, transport });
+  const registry = new NodeRegistry({ settings, transport, cluster });
   const bridge = new SessionBridge({ settings, transport });
   const deps = {
     ctx,
     settings,
     transport,
+    cluster,
     registry,
     bridge,
     spawn,
@@ -48,7 +54,13 @@ export function apply(ctx, config) {
     burstStatus: (node, vmid, paths) => burstStatus(transport, node, { vmid, root: paths.root, burst: paths.burst }),
     stopBurst: (node, vmid, paths) => stopBurst(transport, node, { vmid, root: paths.root, burst: paths.burst }),
   };
-  const tools = [...lifecycleTools(deps), ...screenTools(deps), ...inputTools(deps), ...guestTools(deps)];
+  const tools = [
+    ...clusterTools(deps),
+    ...lifecycleTools(deps),
+    ...screenTools(deps),
+    ...inputTools(deps),
+    ...guestTools(deps),
+  ];
   for (const tool of tools) {
     // A tool never throws at the harness: every failure becomes the canonical value
     // `{ok:false, code, message, hint, details?}`, which the renderer turns into one readable block.

@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "PVE VM recorder",
-    "description": "Record and drive a Proxmox VE virtual machine: host-side QMP screenshots and burst capture, frame fetch with fake-clock intervals, clicks and keys in the logged-in session, PowerShell through the guest agent, and rollback to a snapshot.",
+    "title": "PVE VM & cluster",
+    "description": "Drive a whole Proxmox VE cluster: cluster status and inventory (VMs, storage, nodes), host-side QMP screenshots and burst capture, frame fetch with real frame intervals, clicks and keys in the logged-in session, PowerShell through the guest agent, and rollback to a snapshot.",
     "detail": "docs/DETAIL.md"
   }
 }

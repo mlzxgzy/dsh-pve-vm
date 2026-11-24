@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "PVE 虚拟机录制器",
-    "description": "录制并操作 Proxmox VE 虚拟机：宿主侧 QMP 截图与连拍、带真实帧间隔的取帧、已登录会话内点击与按键、经 guest agent 执行 PowerShell，以及回滚到快照。",
+    "title": "PVE 虚拟机与集群",
+    "description": "以集群为单位操作 Proxmox VE：查看集群状态与资产清单（VM、存储、节点）、宿主侧 QMP 截图与连拍、带真实帧间隔的取帧、已登录会话内点击与按键、经 guest agent 执行 PowerShell，以及回滚到快照。",
     "detail": "docs/DETAIL.md"
   }
 }

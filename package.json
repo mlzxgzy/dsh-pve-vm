@@ -1,18 +1,21 @@
 {
-  "name": "pve-vm-recorder",
-  "version": "1.1.1",
+  "name": "dsh-pve-vm",
+  "version": "1.2.0",
   "private": true,
-  "description": "Proxmox VE VM recorder: host-side QMP screenshots, burst capture, frame fetch, session-1 click/type, guest PowerShell, snapshot rollback.",
+  "description": "Proxmox VE cluster control for agents: cluster status and inventory, host-side QMP screenshots, burst capture, frame fetch, session-1 click/type, guest PowerShell, snapshot rollback.",
   "type": "module",
   "license": "MIT",
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
     "proxmox",
-    "pve",
+    "proxmox-ve",
+    "cluster",
     "qmp",
-    "recording",
-    "computer-use"
+    "virtualization",
+    "computer-use",
+    "screenshot",
+    "vm-automation"
   ],
   "exports": {
     ".": "./index.js",
@@ -49,7 +52,15 @@
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "scripts": {
-    "check": "node --check index.js && node --check lib/bridge.js && node --check lib/burst.js && node --check lib/config.js && node --check lib/errors.js && node --check lib/frames.js && node --check lib/guest.js && node --check lib/img.js && node --check lib/nodes.js && node --check lib/qmp.js && node --check lib/ssh.js && node --check lib/stream.js && node --check lib/actions.js && node --check lib/audit.js && node --check tools/common.js && node --check tools/vm.js && node --check tools/screen.js && node --check tools/input.js && node --check tools/guest.js",
+    "check": "node --check index.js && node --check lib/bridge.js && node --check lib/burst.js && node --check lib/config.js && node --check lib/errors.js && node --check lib/frames.js && node --check lib/guest.js && node --check lib/img.js && node --check lib/nodes.js && node --check lib/qmp.js && node --check lib/ssh.js && node --check lib/stream.js && node --check lib/actions.js && node --check lib/audit.js && node --check lib/cluster.js && node --check tools/common.js && node --check tools/cluster.js && node --check tools/vm.js && node --check tools/screen.js && node --check tools/input.js && node --check tools/guest.js",
     "smoke": "node dev/smoke.mjs status"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mlzxgzy/dsh-pve-vm.git"
+  },
+  "homepage": "https://github.com/mlzxgzy/dsh-pve-vm#readme",
+  "bugs": {
+    "url": "https://github.com/mlzxgzy/dsh-pve-vm/issues"
   }
 }

@@ -1,14 +1,16 @@
-# Bundle layer of pve-vm-recorder.
+# Bundle layer of dsh-pve-vm.
 #
 # One plugin entry. `id` is the settings namespace (the settings card writes its
 # overrides to the profile patch layer by this id), `name` is the package name.
 #
-# No host and no VM id is written here on purpose: this package must work on any
-# cluster. The tools take `node` (an ssh alias or an address) per call, read the
-# `hosts` setting, or pick up `PVE_HOSTS`; the node that owns the VM — and the VM
-# itself, when `vmid` is omitted — is discovered with `qm list` / `qm status` at
-# call time. Everything the schema defaults to is the safe side: no hosts, no vmid
-# limit, guest exec on (it is audited; set `allowGuestExec: false` to hide the tool).
+# No host, no cluster and no VM id is written here on purpose: this package must work
+# on any cluster. The tools take `node` (an ssh alias or an address) per call, read the
+# `hosts` setting, or pick up `PVE_HOSTS`; the cluster is read from whichever seed
+# answers (`/etc/pve/.members`, `pvecm status`, `pvesh get /cluster/resources`), the
+# node that owns a VM comes from that membership file, and the VM itself — when `vmid`
+# is omitted — is the only one running. Everything the schema defaults to is the safe
+# side: no hosts, no vmid limit, cluster discovery `auto`, guest exec on (it is
+# audited; set `allowGuestExec: false` to hide the tool).
 - insert:
-    - id: pve-vm-recorder
-      name: pve-vm-recorder
+    - id: dsh-pve-vm
+      name: dsh-pve-vm

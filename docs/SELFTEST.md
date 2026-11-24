@@ -199,3 +199,47 @@ cat meta.json → {"frames":35,"fps":4.0,"seconds":30.0,"elapsed_ms":8507,"error
 | V13 | 黑屏 → 自动点醒 → 重截 | guest 内 `powercfg /change monitor-timeout-ac 1`，等 85 s 无任何输入，再 `pve_screenshot {node, vmid, name:"v11-wake-e2e2", wake:true}` | 输出 `1280×800 jpeg, 113291 bytes … total 10.7 s` + **`a wake click was sent, then the frame was taken again`**；同条件不带 wake 的调用只截到 12,203 B 全黑帧 | 通过 |
 
 顺带把 `blank`/`woke` 写进 `pve_screenshot` 的可读输出（之前只在 JSON 里），否则使用者无法判断"这张图是被点醒过的"。因为这一处是 v1.1.0 之后改的，版本记作 **1.1.1**。
+
+## v1.2.0：改名 dsh-pve-vm + 集群化
+
+改动口径：项目改名 `dsh-pve-vm`，连接按**集群**为单位（`lib/cluster.js`），新增 `pve_cluster_status` / `pve_cluster_assets` 两个工具，`pve_vm_status` 增加集群头部与 25 条上限。真机环境：`pve-cluster-02`，7 节点（pve01–pve07），PVE `pve-manager/7.4-20/5d6e3351`，knet 传输，config v13。
+
+### 安装时撞到的真冲突
+
+profile 里**已经装了第三方 `dsh-pve-vm@0.2.5`**（`console_*`/`vm_*` 那一套，配置 `sshHost: 192.168.83.101`、`allowVmids: [100, 15047]`），于是新包 `install_bundle` 直接报 `already-installed`。处理顺序：
+
+1. `plugin_manager action=remove_bundle target=dsh-pve-vm`（卸 0.2.5）
+2. `plugin_manager action=remove_bundle target=pve-vm-recorder`（卸上一代）
+3. 手工删掉 profile `cordis.patch.yml` 里残留的 `- id: pve-vm / name: dsh-pve-vm / config: {sshHost…}` 块（备份为 `cordis.patch.yml.bak-<HHMMSS>`）——否则它会以新包名再实例化一次并喂进外来配置
+4. 删掉悬空符号链接 `node_modules/pve-vm-recorder`
+5. `install_bundle target=/data1/01-AiWork/jev研究/dsh-plugin/dsh-pve-vm`
+
+```
+{"stage":"enable","target":"dsh-pve-vm","enabled":true,"changed":true,
+ "application":"applied","bundle":"dsh-pve-vm","version":"1.2.0","warnings":[]}
+```
+
+### 集群验收
+
+| # | 项目 | 命令 | 实测结果 | 判定 |
+| --- | --- | --- | --- | --- |
+| C1 | 一次 ssh 取整个集群 | `pve_cluster_status {node:"192.168.90.104"}` | `cluster pve-cluster-02: quorate, 7/7 votes, config v13` / `7/7 nodes online; 100 of 276 VMs running; 28 storage entries` + 7 行节点（pve07 61/112 VMs、cpu 11.3%、mem 187.7/598.0 GB、up 316d） | 通过 |
+| C2 | 资产过滤（VM） | `pve_cluster_assets {node, on:"pve04", type:"vm"}` | `6 of 79 entries (78 stopped, 1 running)`，列出 3600–3605 模板（4 cpus / 4.0 GB / 32–60 GB），尾部 `… 73 more` | 通过 |
+| C3 | 资产过滤（存储） | `pve_cluster_assets {node, on:"pve05", type:"storage"}` | 4 个池：`local 27.8/93.9 GB`、`vm-b 1121.8/1863.7 GB shared`、`srv-pool 3497.1/4239.0 GB shared`、`pool-a 1349.2/2091.1 GB shared` | 通过 |
+| C4 | 资产过滤（节点） | `pve_cluster_assets {node, type:"node"}` | 7 台，全 `online`，80 cpus，cpu 0.2–11.5%，mem 17.8–187.5 GB | 通过 |
+| C5 | **跨节点解析** | `pve_vm_status {node:"192.168.90.104", vmid:1001}` | `VM 1001 srv-websockify-c2-11 on pve01 (192.168.90.101): running; guest agent ok (1.2 s)` —— 种子是 pve04，`qm status`/`agent ping` 落到 pve01 | 通过 |
+| C6 | 同节点解析 | `pve_vm_status {node, vmid:15047}` | `VM 15047 Copy-of-VM-template-…-winsrv2016 on pve04 (192.168.90.104): running; guest agent ok (940 ms)` | 通过 |
+| C7 | stopped + 无 agent | `pve_vm_status {node, vmid:3600}` | `VM 3600 on pve04 (192.168.90.104): stopped; guest agent unknown` | 通过 |
+| C8 | 列表有界 | `pve_vm_status {node}`（不传 vmid） | 列出 25 台 running（pve01/pve03/pve05/pve07 混合），末行 `… and 251 more VMs; pass vmid, or use pve_cluster_assets to filter` | 通过 |
+| C9 | 断网仍是自解释失败 | `pve_vm_status {node:"192.168.90.199"}` | 8 s 后 `NODE_UNREACHABLE` + `ssh: connect to host 192.168.90.199 port 22: Connection timed out` + `details.hosts` | 通过 |
+
+### 本轮修掉的参数语义 bug
+
+首版 `pve_cluster_assets` 把 `node`（种子地址）同时当过滤条件，于是 `{node:"192.168.90.104", status:"running"}` 返回 `0 of 0`——地址永远不等于节点名。改为两个参数：`node` 只选种子（和其它工具一致），`on` 按节点名过滤。同理把 `pve_vm_status` 的列表从"running 全列 + stopped 12"（276 台时会刷 112 行）改成 `MAX_LISTED_VMS = 25`、running 优先。
+
+### v1.2.0 仍未验证
+
+- `clusterMode:"on"` 在**非集群节点**上的报错路径（未找到 standalone PVE 实测）。
+- 集群不可读（`/etc/pve` 无权限）时 `auto` 回退的真实行为（只做了代码路径，没有真降权实测）。
+- `pvesh` 不可用（被裁剪的 PVE 安装）时的降级。
+- 快照工具的集群化：`pve_snapshot` 仍按"属主节点"操作，未测**回滚后迁移**（`qm rollback` 不需要集群写接口，但迁移后再回滚未试）。

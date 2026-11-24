@@ -31,7 +31,7 @@ const settings = resolveSettings({
   nodes: [process.env.PVE_NODE ?? '192.168.90.104'],
   allowedVmids: [Number(process.env.PVE_VMID ?? 15047)],
   defaultVmid: Number(process.env.PVE_VMID ?? 15047),
-  localOutDir: '/data1/01-AiWork/jev研究/dsh-plugin/pve-vm-recorder/.smoke',
+  localOutDir: '/data1/01-AiWork/jev研究/dsh-plugin/dsh-pve-vm/.smoke',
   allowGuestExec: true,
 });
 const VMID = settings.defaultVmid;

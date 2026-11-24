@@ -11,8 +11,12 @@ import { remotePaths } from '../lib/config.js';
 import { agentPing, queryVmStatus, waitFor } from '../lib/ssh.js';
 import { NODE_PARAM, VMID_PARAM, schema, seconds, textRender, target } from './common.js';
 
-/** How many stopped VMs the cluster view lists before it summarises the rest. */
-const MAX_LISTED_STOPPED = 12;
+/**
+ * How many VMs the cluster view prints before it summarises the rest. Running ones come first,
+ * because that is the question ("what is up right now"); a 276-VM cluster must not produce 276
+ * lines of context when the agent only wanted to know where things are.
+ */
+const MAX_LISTED_VMS = 25;
 
 /** Snapshot names accepted by `qm rollback`. */
 const SNAPSHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -69,10 +73,15 @@ export function lifecycleTools(deps) {
           agent_ms: { type: 'number', description: 'How long the agent ping took, milliseconds.' },
           source: {
             type: 'string',
-            description: 'Where the vmid came from: call, default (settings) or discovered (the only running VM).',
+            description:
+              'Where the vmid came from: call, default (settings), discovered (the only running VM) or cluster (the inventory).',
           },
           burst: { type: 'boolean', description: 'A frame recorder is running for this VM.' },
           frames: { type: 'number', description: 'Frames recorded so far by that recorder.' },
+          cluster: { type: 'string', description: 'Cluster name, when the view came from the cluster itself.' },
+          quorate: { type: 'boolean', description: 'The cluster had quorum when the view was read.' },
+          nodes_online: { type: 'number', description: 'Cluster nodes marked online.' },
+          nodes_total: { type: 'number', description: 'Nodes in the cluster.' },
           hosts: {
             type: 'array',
             items: { type: 'object', properties: {}, additionalProperties: true },
@@ -90,15 +99,22 @@ export function lifecycleTools(deps) {
           vm_total: { type: 'number', description: 'VMs seen on the reachable hosts in total.' },
           vms_truncated: {
             type: 'boolean',
-            description: 'Only running VMs and the first dozen stopped ones are listed; the rest is counted.',
+            description: `At most ${MAX_LISTED_VMS} VMs are listed, running ones first; the rest is counted.`,
           },
           running_count: { type: 'number', description: 'How many of those VMs were running.' },
           wall_ms: { type: 'number', description: 'Wall time of the whole call, milliseconds.' },
         }),
         render: textRender('PVE cluster', (value) => {
           const lines = [];
-          for (const host of value.hosts ?? []) {
-            lines.push(host.ok ? `  ${host.host} → ${host.node}` : `  ${host.host} → unreachable (${host.error})`);
+          if (value.cluster) {
+            lines.push(
+              `cluster ${value.cluster}: ${value.quorate === true ? 'quorate' : 'no quorum'}, ` +
+                `${value.nodes_online ?? 0}/${value.nodes_total ?? 0} nodes online`,
+            );
+          } else {
+            for (const host of value.hosts ?? []) {
+              lines.push(host.ok ? `  ${host.host} → ${host.node}` : `  ${host.host} → unreachable (${host.error})`);
+            }
           }
           const where = (vm) => (vm.node === null || vm.node === undefined ? vm.host : `${vm.node} (${vm.host})`);
           if (value.vmid !== undefined) {
@@ -119,7 +135,7 @@ export function lifecycleTools(deps) {
           }
           if (value.vms_truncated === true) {
             const hidden = (value.vm_total ?? listed) - listed;
-            lines.push(`  … and ${hidden} more (stopped) VMs; pass vmid or node to look at one`);
+            lines.push(`  … and ${hidden} more VMs; pass vmid, or use pve_cluster_assets to filter`);
           }
           if (value.picked !== undefined) {
             lines.push('');
@@ -150,12 +166,25 @@ export function lifecycleTools(deps) {
         const all = view?.vms ?? [];
         const runningVms = all.filter((vm) => vm.status === 'running');
         const stopped = all.filter((vm) => vm.status !== 'running');
-        const listed = [...runningVms, ...stopped.slice(0, MAX_LISTED_STOPPED)];
+        const listed = runningVms.slice(0, MAX_LISTED_VMS);
+        if (listed.length < MAX_LISTED_VMS) {
+          listed.push(...stopped.slice(0, MAX_LISTED_VMS - listed.length));
+        }
+        const cluster = view?.cluster ?? null;
+        const clusterNodes = view?.snapshot?.nodes ?? null;
         const base = {
           hosts: view?.hosts ?? [],
           vms: listed,
           vm_total: all.length,
           running_count: runningVms.length,
+          ...(cluster?.name ? { cluster: cluster.name } : {}),
+          ...(cluster?.quorate === null || cluster?.quorate === undefined ? {} : { quorate: cluster.quorate }),
+          ...(clusterNodes === null
+            ? {}
+            : {
+                nodes_total: clusterNodes.length,
+                nodes_online: clusterNodes.filter((node) => node.online).length,
+              }),
           ...(listed.length < all.length ? { vms_truncated: true } : {}),
         };
         if (wanted === null) {
