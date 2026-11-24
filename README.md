@@ -1,5 +1,7 @@
 # pve-vm-recorder
 
+**English** | [简体中文](README.zh-CN.md)
+
 A DeepSeek Harness (DSH) plugin that lets an agent **watch and drive a Proxmox VE virtual machine** — screen capture, burst recording, frame retrieval, clicking, typing, keys, PowerShell inside the guest, and snapshot rollback — without writing a single `ssh` command by hand.
 
 Built for the case "an agent has to see a Windows VM's screen and operate it": every design choice is about **bounded return values, explainable failures, and reversible actions**.
