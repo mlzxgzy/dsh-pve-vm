@@ -84,7 +84,7 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 
 ## 5. 工具
 
-十一个工具，全部返回 JSON；失败返回 `{ok:false, code, message, hint, details?}`（不抛裸异常）。所有工具都接受 `node`（ssh 别名/地址）。
+二十个工具，全部返回 JSON；失败返回 `{ok:false, code, message, hint, details?}`（不抛裸异常）。所有工具都接受 `node`（ssh 别名/地址）。
 
 | 工具 | 主要参数 | 返回 |
 | --- | --- | --- |
@@ -99,6 +99,15 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 | `pve_type` | `vmid?`, `node?`, `text`, `enter?`, `delayMs?` | `chars,enter,output,ms` |
 | `pve_key` | `vmid?`, `node?`, `key`, `repeat?`, `delayMs?` | `expression,repeat,output,ms` |
 | `pve_guest_exec` | `vmid?`, `node?`, `script`, `timeoutMs?` | `stdout,stderr,exit,truncated,bytes,audit,ms` |
+| `pve_vm_power` | `vmid`, `node?`, `action=start\|stop\|shutdown\|reboot\|reset\|status`, `timeout=60`, `forceStop?`, `wait=true`, `waitTimeoutMs=180000` | `vmid,host,node,action,previous_status,status,changed,waited_ms,output,wall_ms` |
+| `pve_sendkey` | `vmid`, `node?`, `key`, `repeat=1`, `delayMs=150` | `vmid,host,node,key,repeat,output,wall_ms` |
+| `pve_vm_config` | `vmid`, `node?`, `current?`, `network=true`, `osinfo=true` | `status,name,cores,sockets,memory_mb,ostype,boot,agent,scsihw,bios,machine,onboot,disks,nets,interfaces,os,snapshots,config,raw,agent_error,wall_ms` |
+| `pve_vm_snapshot` | `vmid`, `node?`, `action=list\|create\|delete\|rollback`, `name?`, `description?`, `vmstate?`, `force?`, `confirm?` | `vmid,host,node,action,name,snapshots,count,status,output,wall_ms` |
+| `pve_task` | `node?`, `action=list\|status\|log`, `upid?`, `vmid?`, `type?`, `limit=20`, `wait?`, `timeoutMs=300000` | `host,node,action,upid,tasks,total,state,exitstatus,running,waited_ms,log,truncated,wall_ms` |
+| `pve_storage_content` | `node?`, `storage?`, `content?`, `vmid?`, `name?`, `limit=40` | `storages[],items[],total,shown,truncated,wall_ms` |
+| `pve_vm_migrate` | `vmid`, `node?`, `target`, `online=true`, `withLocalDisks?`, `targetstorage?`, `bwlimit?`, `wait=true`, `timeoutMs=600000` | `vmid,host,node,target,new_node,new_host,status,task,task_state,exitstatus,output,waited_ms,wall_ms` |
+| `pve_vm_clone` | `vmid`, `newid`, `node?`, `name?`, `target?`, `storage?`, `full?`, `snapname?`, `pool?`, `bwlimit?`, `wait=true` | `source_vmid,newid,name,host,node,new_node,new_host,status,task,task_state,exitstatus,output,waited_ms,wall_ms` |
+| `pve_vm_delete` | `vmid`, `node?`, `confirm`（必填 true）, `purge=true`, `destroyUnreferencedDisks?`, `stop?`, `wait=true` | `vmid,host,node,name,previous_status,task,task_state,exitstatus,output,waited_ms,wall_ms` |
 
 几个刻意为之的行为：
 
@@ -111,6 +120,11 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 - **`pve_fetch_frames` 支持区间**（`from`/`to`/`max`），3000 帧的录制可以分批取，每批都告诉你 `interval_p50_ms` 和是否 `contiguous`；录制没结束也能取。
 - **`pve_snapshot` 要求 `confirm:true`**，并且结果里回显被回滚到的快照名——因为回滚会丢弃当前状态。
 - **`pve_guest_exec` 的脚本按原样进滚动审计日志**（`audit.jsonl`），结果里带回日志路径。
+- **电源/迁移/克隆/删除都会等结果**：`pve_vm_power` 的 `wait` 用本地轮询确认 VM 真的到了目标状态（`changed` 说明状态确实变了）；`pve_vm_migrate` / `pve_vm_clone` / `pve_vm_delete` 若 qm 回了 UPID 就轮询任务到 `stopped`，失败抛 `TASK_FAILED`、超时抛 `TASK_TIMEOUT`；迁移/克隆结束后重新查一次集群，回报**新属主节点**而不是"你让我去的节点"。
+- **破坏性操作要显式确认**：`pve_vm_snapshot action:"rollback"` 和 `pve_vm_delete` 都要求 `confirm:true`，`pve_vm_delete` 还拒绝正在运行的 VM（除非 `stop:true`），结果里回显被销毁的 VM 名与状态。
+- **`pve_sendkey` 走宿主层**：`qm sendkey` 不需要 guest agent、不需要会话 1，agent 挂了、控制台没登录也能按键——这是 `pve_key`（走 session-1 桥、能发组合键与 `{ENTER}`）失效时的兜底。
+- **`pve_vm_config` 先读配置再看 guest**：`qm config` 一定有答案；`network`/`osinfo` 只是额外问 guest agent，agent 不回就只记 `agent_error`，不让整个调用失败。
+- **`pve_task` 是异步操作的唯一真相**：clone/migrate/备份/恢复都会回 UPID，`action:"status"` 配 `wait:true` 阻塞到结束，`action:"log"` 读尾部日志；`exitstatus:"OK"` 才是成功。
 - **失败带 `details`。** 严格输出 schema 下没有"随手多塞一个字段"的自由，所以诊断信息（帧数、回滚耗时、审计路径、候选 VM）统一放在 `details` 对象里，`hint` 里给出下一步。
 
 ---
@@ -141,6 +155,10 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 | `GUEST_EXEC_DISABLED` | `allowGuestExec` 被关掉 | 开配置 |
 | `GUEST_EXEC_FAILED` | guest 侧仍在跑/失败 | 提高 `guestTimeoutMs` |
 | `BRIDGE_FAILED` / `BRIDGE_TIMEOUT` | session-1 桥失败/超时 | 重试；确认 session 1 已登录 |
+| `VM_POWER_FAILED` / `VM_POWER_TIMEOUT` | qm 拒绝电源操作 / 命令被接受但状态没变 | 看 `details.output`；锁或坏盘常见 |
+| `TASK_FAILED` / `TASK_TIMEOUT` | 异步任务失败 / 超时仍在跑 | 读 `details.exitstatus`；再用 `pve_task action:"log"` |
+| `STORAGE_UNKNOWN` | 该节点上没有这个存储 id | 不带 `storage` 先列池子 |
+| `SNAPSHOT_EXISTS` | 快照名已存在 | 换名或先删 |
 | `BAD_ARGS` | 参数越界（坐标、fps、脚本长度…） | 看 `message` |
 | `CONVERT_FAILED` | PPM 解码或本地编码失败 | 检查本机 ffmpeg/convert |
 | `INTERNAL` | 未预期异常 | 附 `message` |
@@ -165,6 +183,12 @@ plugin_manager install_bundle target=/abs/path/to/dsh-plugin/dsh-pve-vm
 14. **坐标是屏幕坐标，别按窗口相对算。** 1280×800 下任务栏"开始"按钮中心约 **(22,783)**；y=758/770 落在任务栏条上但点不开菜单（实测）。UIA 的 `BoundingRectangle` 同样是屏幕坐标。
 15. **逐主机回退依赖 `qm list` 的文本格式。** 解析器只认 `VMID NAME STATUS MEM(MB) BOOTDISK(GB)` 这五列（`lib/nodes.js` 的 `QM_LIST_ROW`）；集群模式走 JSON，不受影响。
 16. **ssh 链路的失败与"插件坏了"要分开看。** VPN 断掉的表现是约 8 s 后 `NODE_UNREACHABLE`（`ssh: connect to host … Connection timed out`），不是工具超时。
+
+17. **`qm <cmd> --help` 在 PVE 7.4 上不存在**（`Unknown option: help` / `400 unable to parse option`）。选项名来自节点上的 `man qm`（`/usr/share/man/man1/qm.1.gz`）；换 PVE 大版本时先重读 man，别假设选项没变。
+18. **迁移/克隆只对集群成员成立**：`qm migrate` 的目标必须是 `pvecm nodes` 里的节点名（工具会先校验并列出候选）；`qm clone` 的 `newid` 必须空闲，`--full` 会真的复制整块盘（32 GB 模板就是 32 GB 流量）。
+19. **`pve_vm_delete` 不可撤销**，`--purge` 默认开（会从备份任务/HA/资源池里摘掉）。它拒绝 running 的 VM，除非显式 `stop:true`——这是故意让"顺手删掉正在跑的实验机"需要两次确认。
+20. **`pve_vm_snapshot` 的 rollback 不等 guest**：它只保证快照回滚完成；回滚后要等 agent 可用，用 `pve_snapshot`（它会等 `agent_up_ms`）。
+21. **`pve_sendkey` 的键名是 QEMU 名字**（`ret`/`esc`/`tab`/`ctrl-alt-delete`/`alt-f4`/`f12`），不是 SendKeys 表达式；组合键请用 `pve_key`。
 
 ---
 

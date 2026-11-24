@@ -18,6 +18,15 @@ pve_type          发文本（SendKeys，已转义）
 pve_key           按一个键或组合键（ctrl+a、alt+f4、f5…）
 pve_guest_exec    经 QEMU guest agent 在 guest 内跑 PowerShell
 pve_snapshot      回滚到快照、重启、等 agent 就绪
+pve_vm_power      开机 / 关机 / 优雅关机 / 重启 / 硬复位，并等到目标状态
+pve_sendkey       经 QMP 直接按键（qm sendkey），不需要 agent、不需要会话
+pve_vm_config     核数、内存、磁盘、网卡、启动顺序、快照、guest IP 与系统
+pve_vm_snapshot   快照 列表 / 创建 / 删除 / 回滚（回滚需 confirm）
+pve_task          节点任务队列：列表、状态（可等待）、日志尾部
+pve_storage_content  存储池，或某个池里的 ISO / 模板 / 备份 / 磁盘卷
+pve_vm_migrate    把 VM 迁到集群另一节点（在线或离线），并回报它现在在哪
+pve_vm_clone      从 VM 或模板克隆成新 id，可指定目标节点/存储
+pve_vm_delete     销毁 VM（confirm:true；运行中的要 stop:true）
 ```
 
 ## 没有写死任何东西

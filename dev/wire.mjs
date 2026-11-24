@@ -66,6 +66,6 @@ apply(ctxOff, config({ allowGuestExec: false }));
 const conditionalOff = offRegistered.find((entry) => entry.definition.name === 'pve_guest_exec');
 const gatedOff = typeof conditionalOff?.options?.when === 'function' && (await conditionalOff.options.when({})) === false;
 console.log('guest_exec gated when enabled:', gatedOn, '| hidden when disabled:', gatedOff);
-console.log('expected 11 tools:', names.length === 11);
-console.log(ok && names.length === 11 ? 'WIRING OK' : 'WIRING FAILED');
+console.log('expected 20 tools:', names.length === 20);
+console.log(ok && names.length === 20 ? 'WIRING OK' : 'WIRING FAILED');
 for (const dispose of cleaning) if (typeof dispose === 'function') dispose();

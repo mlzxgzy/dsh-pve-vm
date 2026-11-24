@@ -20,6 +20,12 @@ import { lifecycleTools } from './tools/vm.js';
 import { screenTools } from './tools/screen.js';
 import { inputTools } from './tools/input.js';
 import { guestTools } from './tools/guest.js';
+import { powerTools } from './tools/power.js';
+import { inspectTools } from './tools/inspect.js';
+import { snapshotTools } from './tools/snapshots.js';
+import { taskTools } from './tools/tasks.js';
+import { storageTools } from './tools/storage.js';
+import { placementTools } from './tools/placement.js';
 
 export { Config };
 
@@ -60,6 +66,12 @@ export function apply(ctx, config) {
     ...screenTools(deps),
     ...inputTools(deps),
     ...guestTools(deps),
+    ...powerTools(deps),
+    ...inspectTools(deps),
+    ...snapshotTools(deps),
+    ...taskTools(deps),
+    ...storageTools(deps),
+    ...placementTools(deps),
   ];
   for (const tool of tools) {
     // A tool never throws at the harness: every failure becomes the canonical value

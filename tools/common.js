@@ -5,7 +5,7 @@
  * `{ok:false, code, message, hint}`, and an output schema that demanded `path`/`bytes` would reject it
  * before the renderer could turn it into the self-explanatory text the brief asks for.
  */
-import { HINTS } from '../lib/errors.js';
+import { HINTS, VmError } from '../lib/errors.js';
 
 /** The failure part shared by every tool's output schema. */
 export const FAILURE_PROPS = {
@@ -120,6 +120,32 @@ export async function target(deps, args, exec) {
     status: resolved.status,
     vm: picked.vm,
   };
+}
+
+/**
+ * A host to ssh to when the call is not about one VM (task lists, storage content).
+ *
+ * The cluster snapshot already carries the host that answered, so this reuses it instead of
+ * guessing: `seed.host` is an address that provably works right now.
+ * @param {object} deps plugin wiring.
+ * @param {object} args tool arguments (`node`).
+ * @param {object} exec tool execution context.
+ * @returns {Promise<{host:string, node:string|null, cluster:string|null}>} the seed host.
+ */
+export async function seedHost(deps, args, exec) {
+  const signal = exec?.signal;
+  const snapshot = await deps.registry.clusterView({ host: args.node, signal });
+  if (snapshot?.seed?.host) {
+    return { host: snapshot.seed.host, node: snapshot.seed.node ?? null, cluster: snapshot.cluster?.name ?? null };
+  }
+  const view = await deps.registry.listVms({ host: args.node, signal });
+  const entry = (view?.hosts ?? []).find((candidate) => typeof candidate?.host === 'string' && candidate.host.length > 0);
+  if (!entry) {
+    throw new VmError('NODE_NOT_CONFIGURED', 'no PVE host answered, and the call did not name one', {
+      hint: 'Pass node:"pve04" (an ssh alias or an address), set the settings `hosts` list, or export PVE_HOSTS.',
+    });
+  }
+  return { host: entry.host, node: entry.node ?? null, cluster: view?.cluster?.name ?? null };
 }
 
 /** Format a duration for a human. */

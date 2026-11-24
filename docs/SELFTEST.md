@@ -265,3 +265,46 @@ profile 里**已经装了第三方 `dsh-pve-vm@0.2.5`**（`console_*`/`vm_*` 那
 - 真单机 PVE 节点（本网络 7 台全在同一集群）；standalone 仅夹具覆盖。
 - `/etc/pve` 无权限（非 root ssh 用户）时的 `auto` 回退真实行为。
 - `pvesh` 被裁剪的安装。
+
+---
+
+## v1.3.0 — 常用功能补齐（20 个工具）
+
+对真实集群（pve-cluster-02，7 节点）逐条调用，参数里都带 `node:"192.168.90.104"`（本 profile 没有写死的 host）。
+
+| # | 调用 | 结果 |
+| --- | --- | --- |
+| D1 | `pve_vm_config {vmid:15047}` | `VM 15047 … on pve04: running, 1×4 vCPU, 4096 MiB, win10`；`disk ide0: vm-b:base-3603-disk-0/vm-15047-disk-0,size=60G`；`snapshots: init`；guest OS `Windows Server 2016 Datacenter`（无网卡，故无 IP 行） |
+| D2 | `pve_task {action:"list",limit:8}` | 8 条，含本轮之前的 `qmrollback/qmstop/qmstart` 三条 UPID，状态全 `OK` |
+| D3 | `pve_storage_content {}` | 4 个池：`local(dir) 21.2/93.9 GB`、`srv-pool(rbd) 3.4/4.1 TB shared`、`pool-a(cephfs) 1.3/2.0 TB shared`、`vm-b(rbd) 1.1/1.8 TB shared` |
+| D4 | `pve_storage_content {storage:"local",content:"iso",limit:6}` | `7 volume(s)`，列出 debian-11.4.0-DVD / virtio-win-0.1.221 等，并给出 `… 1 more` |
+| D5 | `pve_vm_snapshot {action:"list"}` | `1 snapshot(s), running`；`init 2026-11-23 20:03:05` |
+| D6 | `pve_vm_snapshot {action:"create",name:"dsh-test"}` | `create dsh-test done in 7.7 s`，列表变 2 条 |
+| D7 | `pve_vm_snapshot {action:"delete",name:"dsh-test"}` | `delete dsh-test done in 6.2 s`，列表回到 1 条 |
+| D8 | `pve_sendkey {key:"esc"}` | `sent {esc} × 1 … in 3.5 s`（宿主层，不经 agent/会话） |
+| D9 | `pve_vm_power {vmid:9997,action:"start"}` | `stopped → start → running in 922 ms` |
+| D10 | `pve_vm_power {vmid:9997,action:"stop"}` | `running → stop → stopped in 980 ms` |
+| D11 | `pve_vm_migrate {vmid:9999,target:"pve05"}` | `moved from pve04 to pve05 (192.168.90.105), stopped`，qm 输出 `migration finished successfully (duration 00:00:02)` |
+| D12 | `pve_vm_clone {vmid:9999,newid:9998,name:"dsh-clone-child"}` | `cloned VM 9999 → VM 9998 "dsh-clone-child" on pve05 (192.168.90.105), stopped` |
+| D13 | `pve_vm_delete {vmid:9998,confirm:true}` | `destroyed VM 9998 "dsh-clone-child" on pve05 (was stopped)` |
+| D14 | `pve_vm_delete {vmid:9999,confirm:true}` | 同上，9999 也销毁；随后 `qm status 9999` on pve05 → `Configuration file … does not exist`（干净） |
+| D15 | `pve_vm_delete {vmid:9997,confirm:true}` | 测试机 9997 销毁，集群恢复原状（只剩 15047 在 pve04 运行） |
+
+测试用 VM 9997/9998/9999 都是**无盘**小机器（`qm create … --memory 256 --cores 1`），所以迁移/克隆是秒级、不复制 60 GB 磁盘——但走的是真实的 `qm migrate` / `qm clone` / `qm destroy` 路径。
+
+### 本轮修掉的真 bug（都是"严格输出 schema + null"这一类）
+
+1. `parseOsInfo` 把 agent 没给的字段写成 `null` → `value.os.hostname must be a string`。改为**只放 agent 真答了的键**。
+2. `parseInterfaces` 的 `interface/mac/prefix` 可能是 `null` → 同样的校验失败。改为逐键判断，`ip` 必有、其余有才写。
+3. `compactStorageContent` / `compactStorageDefs` 同样把 `storage/vmid/notes/active` 写成 `null` → `pve_storage_content` 整调用失败。改为只写有值的键。
+4. `pve_vm_snapshot` 的 delete 分支自己列了一遍快照却漏了 `status`，可读输出显示 `unknown`。改为 delete 后走同一条列表路径。
+5. `waited_ms` 在 qm 同步完成（没有 UPID）时固定 0，看起来像"没等"。改为回落到 ssh 往返时间。
+
+### 仍未验证
+
+- `pve_vm_power` 的 `shutdown`/`reboot`/`reset`（只实测了 `start`/`stop`；优雅关机的 60 s 超时与 `forceStop` 没走到）。
+- `pve_vm_snapshot` 的 `vmstate:true`（带内存快照）与 `force` 删除。
+- `pve_vm_clone` 的 `full:true`（会真的复制 60 GB 磁盘）、`snapname`、跨存储克隆。
+- `pve_vm_migrate` 的 `withLocalDisks:true` 与在线迁移（测试机是无盘、停机状态）。
+- `pve_task` 的 `wait:true` 在长任务（clone/备份）上的轮询与 `TASK_TIMEOUT` 分支。
+- PVE 8.x：选项名来自本集群 7.4 的 `man qm`，8.x 未验证。

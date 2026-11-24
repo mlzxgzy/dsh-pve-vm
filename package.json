@@ -1,6 +1,6 @@
 {
   "name": "dsh-pve-vm",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "private": true,
   "description": "Proxmox VE cluster control for agents: cluster status and inventory, host-side QMP screenshots, burst capture, frame fetch, session-1 click/type, guest PowerShell, snapshot rollback.",
   "type": "module",
@@ -52,7 +52,7 @@
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "scripts": {
-    "check": "node --check index.js && node --check lib/bridge.js && node --check lib/burst.js && node --check lib/config.js && node --check lib/errors.js && node --check lib/frames.js && node --check lib/guest.js && node --check lib/img.js && node --check lib/nodes.js && node --check lib/qmp.js && node --check lib/ssh.js && node --check lib/stream.js && node --check lib/actions.js && node --check lib/audit.js && node --check lib/cluster.js && node --check tools/common.js && node --check tools/cluster.js && node --check tools/vm.js && node --check tools/screen.js && node --check tools/input.js && node --check tools/guest.js",
+    "check": "node --check index.js && node --check lib/bridge.js && node --check lib/burst.js && node --check lib/config.js && node --check lib/errors.js && node --check lib/frames.js && node --check lib/guest.js && node --check lib/img.js && node --check lib/nodes.js && node --check lib/qmp.js && node --check lib/ssh.js && node --check lib/stream.js && node --check lib/actions.js && node --check lib/audit.js && node --check lib/cluster.js && node --check lib/vmops.js && node --check lib/tasks.js && node --check tools/common.js && node --check tools/cluster.js && node --check tools/vm.js && node --check tools/screen.js && node --check tools/input.js && node --check tools/guest.js && node --check tools/power.js && node --check tools/inspect.js && node --check tools/snapshots.js && node --check tools/tasks.js && node --check tools/storage.js && node --check tools/placement.js",
     "smoke": "node dev/smoke.mjs status",
     "test:cluster": "node dev/test-cluster.mjs",
     "test": "node dev/test-cluster.mjs",

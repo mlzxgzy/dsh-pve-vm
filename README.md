@@ -18,6 +18,15 @@ pve_type          send text (SendKeys, escaped)
 pve_key           press one key or a chord (ctrl+a, alt+f4, f5, …)
 pve_guest_exec    run PowerShell inside the guest over the QEMU guest agent
 pve_snapshot      roll back to a snapshot, reboot, and wait for the agent
+pve_vm_power      start / stop / shutdown / reboot / reset, and wait for the state it reached
+pve_sendkey       one key straight through QMP (`qm sendkey`) — no agent, no session needed
+pve_vm_config     cores, memory, disks, NICs, boot order, snapshots, guest IPs and OS
+pve_vm_snapshot   list / create / delete / roll back a snapshot (rollback needs confirm)
+pve_task          the node task queue: list, status (optionally wait), log tail
+pve_storage_content  storage pools, or the ISO / template / backup / disk volumes inside one
+pve_vm_migrate    move a VM to another cluster node, live or offline, then report where it is
+pve_vm_clone      clone a VM or template into a new id, optionally onto another node/storage
+pve_vm_delete     destroy a VM (confirm:true; refuses a running VM unless stop:true)
 ```
 
 ## Nothing is baked in
@@ -33,7 +42,7 @@ No cluster address, node name, VMID or snapshot name lives in this package.
 | Which VM | `vmid`, else `defaultVmid`, else the only *running* VM; several running VMs fail with `AMBIGUOUS_VMID` and the candidate list |
 | What may be touched | `allowedVmids` is an **optional** restriction (empty = unrestricted) |
 
-`clusterMode` decides how hard that is: `auto` (default — try the cluster, fall back to per-host `qm list`), `on` (must be a cluster), `off` (never read it). Cluster reads are read-only: no create, migrate or destroy.
+`clusterMode` decides how hard that is: `auto` (default — try the cluster, fall back to per-host `qm list`), `on` (must be a cluster), `off` (never read it). Reads are read-only; the four tools that change the cluster — `pve_vm_power`, `pve_vm_migrate`, `pve_vm_clone`, `pve_vm_delete` — say exactly what they did and where the VM ended up, and the two destructive ones (`pve_vm_delete`, snapshot rollback) require `confirm:true`.
 
 ## Install
 
