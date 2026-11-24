@@ -112,6 +112,10 @@ export function screenTools(deps) {
             `screendump ${seconds(value.ms)}, total ${seconds(value.wall_ms)}` +
               (value.encoder ? `; encoder ${value.encoder}` : ''),
           ];
+          if (value.blank === true) {
+            lines.push('the frame was blank: the guest is not composing to the console');
+          }
+          if (value.woke === true) lines.push('a wake click was sent, then the frame was taken again');
           if (value.data !== undefined) lines.push('pixels included as base64');
           if (value.inline_skipped !== undefined) lines.push(value.inline_skipped);
           return lines.join('\n');

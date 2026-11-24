@@ -154,7 +154,7 @@ cat meta.json → {"frames":35,"fps":4.0,"seconds":30.0,"elapsed_ms":8507,"error
 
 ---
 
-# v1.1.0 复测（2026-11-24 下午）
+# v1.1.0 / v1.1.1 复测（2026-11-24 下午）
 
 改动主题：**不写死任何地址/VMID**、去掉白名单式硬限制、`wake` 黑屏唤醒、边录边取、每个版本一个 commit。
 环境：本机 → VPN → pve04 `192.168.90.104`（VM 15047 Windows Server 2016）；pve01 `192.168.90.101` 仅用于多节点发现。
@@ -191,3 +191,11 @@ cat meta.json → {"frames":35,"fps":4.0,"seconds":30.0,"elapsed_ms":8507,"error
 - 长文本与 `+^%~(){}[]` 转义的端到端效果（只做了单测级验证）。
 - 多台 VM 同时 running 时 `AMBIGUOUS_VMID` 的真实触发（当前集群恰好只有一台 running）。
 - 除 pve01/pve04 之外的 PVE 版本（`qm list` 列格式假设）。
+
+## v1.1.1 补测：wake 端到端
+
+| # | 项目 | 命令 | 实测结果 | 判定 |
+| --- | --- | --- | --- | --- |
+| V13 | 黑屏 → 自动点醒 → 重截 | guest 内 `powercfg /change monitor-timeout-ac 1`，等 85 s 无任何输入，再 `pve_screenshot {node, vmid, name:"v11-wake-e2e2", wake:true}` | 输出 `1280×800 jpeg, 113291 bytes … total 10.7 s` + **`a wake click was sent, then the frame was taken again`**；同条件不带 wake 的调用只截到 12,203 B 全黑帧 | 通过 |
+
+顺带把 `blank`/`woke` 写进 `pve_screenshot` 的可读输出（之前只在 JSON 里），否则使用者无法判断"这张图是被点醒过的"。因为这一处是 v1.1.0 之后改的，版本记作 **1.1.1**。
