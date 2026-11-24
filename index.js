@@ -9,11 +9,11 @@
  * one shared ssh transport / node registry / bridge is reused so caches survive between calls.
  */
 import { resolveSettings, snapshot, Config } from './lib/config.js';
+import { guard } from './lib/errors.js';
 import { NodeRegistry } from './lib/nodes.js';
 import { Transport } from './lib/ssh.js';
 import { SessionBridge } from './lib/bridge.js';
 import { burstStatus, stopBurst } from './lib/burst.js';
-import { remotePaths } from './lib/config.js';
 import { lifecycleTools } from './tools/vm.js';
 import { screenTools } from './tools/screen.js';
 import { inputTools } from './tools/input.js';
@@ -50,21 +50,27 @@ export function apply(ctx, config) {
   };
   const tools = [...lifecycleTools(deps), ...screenTools(deps), ...inputTools(deps), ...guestTools(deps)];
   for (const tool of tools) {
+    // A tool never throws at the harness: every failure becomes the canonical value
+    // `{ok:false, code, message, hint, details?}`, which the renderer turns into one readable block.
+    // (Most tools guard themselves; this is the net for the few paths that throw early.)
+    const definition = { ...tool, execute: (args, exec) => guard(() => tool.execute(args, exec)) };
     // `pve_guest_exec` is arbitrary PowerShell as SYSTEM: it is not merely refused, it is absent
     // from the tool list unless the operator enabled it.
-    ctx.tools.register(tool, tool.name === 'pve_guest_exec' ? { when: () => settings().allowGuestExec === true } : {});
+    ctx.tools.register(
+      definition,
+      tool.name === 'pve_guest_exec' ? { when: () => settings().allowGuestExec === true } : {},
+    );
   }
   ctx.effect(() => () => {
     // Unloading the plugin must not leave a recorder loop on the node. The recorder also stops
-    // itself at its deadline; this is the fast path, and it never blocks the unload.
+    // itself at its deadline; this is the fast path, and it never blocks the unload. Every host is
+    // asked in one round trip, and every VM's burst directory is covered without knowing the ids.
     registry.clear();
     bridge.reset();
     const current = settings();
-    for (const vmid of current.allowedVmids) {
-      const paths = remotePaths(current, vmid);
-      for (const node of current.ssh.nodes) {
-        stopBurst(transport, node, { vmid, root: paths.root, burst: paths.burst }).catch(() => {});
-      }
+    const stopAll = `set -u\nfor d in ${current.tmpfsDir}/v*/burst; do [ -d "$d" ] && : > "$d/STOP"; done\n`;
+    for (const host of current.ssh.hosts) {
+      transport.run(host, stopAll, { timeoutMs: 8000 }).catch(() => {});
     }
   });
 }

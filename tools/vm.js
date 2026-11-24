@@ -1,23 +1,26 @@
 /**
- * Lifecycle tools: where the VM is, is the agent up, and the reset button.
+ * Lifecycle tools: what the cluster looks like, and rolling a VM back to a snapshot.
  *
- * The node is discovered, never assumed: the same VM id exists on other nodes of the cluster, and a
- * hard-coded host is how the built-in Proxmox console tools fail (`Configuration file
- * 'nodes/pve01/qemu-server/15047.conf' does not exist`).
+ * Nothing here knows a host or a VM id in advance — `pve_vm_status` answers "what is running where"
+ * with `qm list` on every known host, and every other tool resolves the owner of a VM with
+ * `qm status` at call time.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { VmError, guard } from '../lib/errors.js';
+import { VmError } from '../lib/errors.js';
 import { remotePaths } from '../lib/config.js';
 import { agentPing, queryVmStatus, waitFor } from '../lib/ssh.js';
-import { schema, textRender, seconds, VMID_PARAM } from './common.js';
+import { NODE_PARAM, VMID_PARAM, schema, seconds, textRender, target } from './common.js';
 
-/** A valid snapshot name on PVE. */
+/** How many stopped VMs the cluster view lists before it summarises the rest. */
+const MAX_LISTED_STOPPED = 12;
+
+/** Snapshot names accepted by `qm rollback`. */
 const SNAPSHOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
- * Parse `qm listsnapshot` output into names (newest last) without the pseudo-snapshot `current`.
- * @param {string} stdout command output.
- * @returns {string[]} snapshot names.
+ * Snapshot names in a `qm listsnapshot` table.
+ * @param {string} stdout table text.
+ * @returns {string[]} names, oldest first.
  */
 export function parseSnapshots(stdout) {
   const names = [];
@@ -31,8 +34,8 @@ export function parseSnapshots(stdout) {
 }
 
 /**
- * Build the lifecycle tools.
- * @param {{settings:()=>object, transport:object, registry:object, bridge:object}} deps plugin dependencies.
+ * The lifecycle tools.
+ * @param {object} deps plugin wiring.
  * @returns {object[]} tool definitions.
  */
 export function lifecycleTools(deps) {
@@ -40,231 +43,315 @@ export function lifecycleTools(deps) {
     defineTool({
       name: 'pve_vm_status',
       description:
-        'Report one VM: the node that actually hosts it, its power state, whether the guest agent answers, ' +
-        'and whether a frame recorder is running. Call this first — every other tool tolerates an unknown node, ' +
-        'but knowing the state saves a failed call. Costs one ssh round trip (agent ping another).',
+        'Show the PVE cluster as it is right now: every known host (`qm list`), every VM with its ' +
+        'status and owner node, and — for one VM — the guest agent answer and whether a frame ' +
+        'recorder is running. Use it first: every other tool discovers the host the same way, so ' +
+        'this call is also the cheapest way to prove that ssh and the VPN work.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         fresh: {
           type: 'boolean',
-          description: 'Re-probe the whole node list instead of trusting the 60 s node cache (default false).',
+          description: 'Ignore the cached cluster listing and ask the hosts again (default false).',
         },
       },
       output: {
         schema: schema({
-          vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node address that hosts the VM (an ssh target, not a cluster name).' },
-          status: { type: 'string', description: 'Power state from qm status: running, stopped, paused…' },
-          agent: { type: 'string', enum: ['ok', 'down', 'unknown'], description: 'Guest agent ping: ok, down, or unknown (VM not running).' },
-          agent_ms: { type: 'number', description: 'Time the agent ping took, milliseconds.' },
+          vmid: { type: 'number', description: 'The VM the detail block is about, when one was chosen.' },
+          host: { type: 'string', description: 'ssh host (alias or address) that owns the VM.' },
+          node: { type: 'string', description: 'PVE node name as the host reported it (`hostname`).' },
+          status: { type: 'string', description: 'VM status: running, stopped, paused or suspended.' },
+          agent: {
+            type: 'string',
+            enum: ['ok', 'down', 'unknown'],
+            description: 'Guest agent: ok when `qm agent ping` exits 0, unknown when the VM is not running.',
+          },
+          agent_ms: { type: 'number', description: 'How long the agent ping took, milliseconds.' },
+          source: {
+            type: 'string',
+            description: 'Where the vmid came from: call, default (settings) or discovered (the only running VM).',
+          },
           burst: { type: 'boolean', description: 'A frame recorder is running for this VM.' },
-          frames: { type: 'number', description: 'Frames recorded so far by the running recorder.' },
-          allowed_vmids: { type: 'array', items: { type: 'number' }, description: 'VM ids this plugin may touch.' },
-          nodes: { type: 'array', items: { type: 'string' }, description: 'Node addresses this plugin may ssh to.' },
-          configured: { type: 'boolean', description: 'False when no node or VM id is configured yet: the plugin is inert until allowlists are set.' },
-          wall_ms: { type: 'number', description: 'Total wall time.' },
+          frames: { type: 'number', description: 'Frames recorded so far by that recorder.' },
+          hosts: {
+            type: 'array',
+            items: { type: 'object', properties: {}, additionalProperties: true },
+            description: 'Per host: host, node name, whether `qm list` answered, and the error when it did not.',
+          },
+          vms: {
+            type: 'array',
+            items: { type: 'object', properties: {}, additionalProperties: true },
+            description: 'Every VM seen: vmid, name, status, node, host, mem_mb, disk_gb.',
+          },
+          picked: {
+            type: 'number',
+            description: 'The VM a call without `vmid` would work on, when exactly one is running.',
+          },
+          vm_total: { type: 'number', description: 'VMs seen on the reachable hosts in total.' },
+          vms_truncated: {
+            type: 'boolean',
+            description: 'Only running VMs and the first dozen stopped ones are listed; the rest is counted.',
+          },
+          running_count: { type: 'number', description: 'How many of those VMs were running.' },
+          wall_ms: { type: 'number', description: 'Wall time of the whole call, milliseconds.' },
         }),
-        render: textRender('VM status', (value) =>
-          [
-            `VM ${value.vmid} on ${value.node}: ${value.status}; guest agent ${value.agent}` +
-              (value.agent_ms !== undefined ? ` (${seconds(value.agent_ms)})` : ''),
-            value.burst ? `recorder running, ${value.frames ?? 0} frames so far` : 'no recorder running',
-            `allowed VMs: ${(value.allowed_vmids ?? []).join(', ') || '(none)'}; nodes: ${(value.nodes ?? []).join(', ') || '(none)'}`,
-            value.configured === false ? 'The plugin is inert: set nodes and allowedVmids in its settings.' : '',
-          ]
-            .filter((line) => line.length > 0)
-            .join('\n'),
-        ),
+        render: textRender('PVE cluster', (value) => {
+          const lines = [];
+          for (const host of value.hosts ?? []) {
+            lines.push(host.ok ? `  ${host.host} → ${host.node}` : `  ${host.host} → unreachable (${host.error})`);
+          }
+          const where = (vm) => (vm.node === null || vm.node === undefined ? vm.host : `${vm.node} (${vm.host})`);
+          if (value.vmid !== undefined) {
+            // One VM was asked for: the rest of the cluster is noise in this reply.
+            const match = (value.vms ?? []).find((vm) => vm.vmid === value.vmid);
+            const on = value.node === null || value.node === undefined ? value.host : `${value.node} (${value.host})`;
+            lines.push(
+              `VM ${value.vmid}${match ? ` ${match.name}` : ''} on ${on}: ${value.status}; guest agent ${value.agent}` +
+                (value.agent_ms === undefined ? '' : ` (${seconds(value.agent_ms)})`) +
+                (value.burst === true ? `; recording, ${value.frames ?? 0} frames so far` : ''),
+            );
+            return lines.join('\n');
+          }
+          let listed = 0;
+          for (const vm of value.vms ?? []) {
+            lines.push(`  VM ${vm.vmid} ${vm.name}: ${vm.status} on ${where(vm)}`);
+            listed += 1;
+          }
+          if (value.vms_truncated === true) {
+            const hidden = (value.vm_total ?? listed) - listed;
+            lines.push(`  … and ${hidden} more (stopped) VMs; pass vmid or node to look at one`);
+          }
+          if (value.picked !== undefined) {
+            lines.push('');
+            lines.push(`A call without vmid would use VM ${value.picked} (the only one running).`);
+          }
+          return lines.join('\n');
+        }),
       },
-      timeoutMs: 60000,
       async execute(args, exec) {
-        return guard(async () => {
-          const started = Date.now();
-          const settings = deps.settings();
-          const vmid = deps.registry.assertVmid(args.vmid);
-          const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal, fresh: args.fresh === true });
-          const status = await queryVmStatus(deps.transport, resolved.node, vmid);
-          let agent = 'unknown';
-          let agentMs;
-          if (status.status === 'running') {
-            const pingStart = Date.now();
-            const ok = await agentPing(deps.transport, resolved.node, vmid);
-            agentMs = Date.now() - pingStart;
-            agent = ok ? 'ok' : 'down';
-          }
-          let burst = false;
-          let frames;
-          const paths = remotePaths(settings, vmid);
-          const state = await deps.burstStatus?.(resolved.node, vmid, paths);
-          if (state !== undefined && state !== null) {
-            burst = state.running === true;
-            frames = state.frames;
-          }
+        const signal = exec.signal;
+        const settings = deps.settings();
+        const started = Date.now();
+        const wanted =
+          args.vmid !== undefined && args.vmid !== null
+            ? args.vmid
+            : settings.defaultVmid > 0
+              ? settings.defaultVmid
+              : null;
+        let view = null;
+        try {
+          view = await deps.registry.listVms({ host: args.node, signal, fresh: args.fresh === true });
+        } catch (error) {
+          // An explicit vmid still works when the listing failed for one of several hosts.
+          if (wanted === null) throw error;
+        }
+        // The listing stays bounded: a lab host easily carries 80 stopped templates, and a reply
+        // that long costs more context than the answer is worth.
+        const all = view?.vms ?? [];
+        const runningVms = all.filter((vm) => vm.status === 'running');
+        const stopped = all.filter((vm) => vm.status !== 'running');
+        const listed = [...runningVms, ...stopped.slice(0, MAX_LISTED_STOPPED)];
+        const base = {
+          hosts: view?.hosts ?? [],
+          vms: listed,
+          vm_total: all.length,
+          running_count: runningVms.length,
+          ...(listed.length < all.length ? { vms_truncated: true } : {}),
+        };
+        if (wanted === null) {
           return {
             ok: true,
-            vmid,
-            node: resolved.node,
-            status: status.status ?? 'unknown',
-            agent,
-            ...(agentMs !== undefined ? { agent_ms: agentMs } : {}),
-            burst,
-            ...(frames !== undefined ? { frames } : {}),
-            allowed_vmids: settings.allowedVmids,
-            nodes: settings.ssh.nodes,
-            configured: settings.ssh.nodes.length > 0 && settings.allowedVmids.length > 0,
+            ...base,
+            ...(runningVms.length === 1 ? { picked: runningVms[0].vmid } : {}),
             wall_ms: Date.now() - started,
           };
-        });
+        }
+        const resolved = await target(deps, args, exec);
+        const paths = remotePaths(settings, resolved.vmid);
+        let agent = 'unknown';
+        let agentMs;
+        if (resolved.status === 'running') {
+          const pingStarted = Date.now();
+          agent = (await agentPing(deps.transport, resolved.host, resolved.vmid)) ? 'ok' : 'down';
+          agentMs = Date.now() - pingStarted;
+        }
+        const burst = await deps.burstStatus(resolved.host, resolved.vmid, paths).catch(() => null);
+        return {
+          ok: true,
+          vmid: resolved.vmid,
+          host: resolved.host,
+          node: resolved.node,
+          status: resolved.status,
+          agent,
+          ...(agentMs === undefined ? {} : { agent_ms: agentMs }),
+          source: resolved.source,
+          burst: burst?.running === true,
+          ...(burst?.running === true ? { frames: burst.frames } : {}),
+          ...base,
+          wall_ms: Date.now() - started,
+        };
       },
     }),
 
     defineTool({
       name: 'pve_snapshot',
       description:
-        'Roll the VM back to a snapshot and boot it. THIS DESTROYS THE CURRENT DISK STATE: it stops the VM, ' +
-        'rolls back, starts it again and waits for the guest agent, so the guest session, the bridge task and any ' +
-        'recorder are gone afterwards. Requires confirm:true and names the snapshot it restored in the result. ' +
-        'Takes tens of seconds (stop + rollback + boot + agent); the agent wait dominates.',
+        'Roll a VM back to a snapshot and boot it: stop it, `qm rollback`, `qm start`, then wait until ' +
+        'the guest agent answers again (typically 30–90 s). This destroys the current disk state, so ' +
+        'the call is refused unless `confirm:true` is passed, and the result names the snapshot that ' +
+        'was restored. Frames already recorded on the node tmpfs are left alone.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         snapshot: {
           type: 'string',
-          description: 'Snapshot name to restore (letters, digits, dot, dash, underscore). Defaults to "init".',
-          default: 'init',
+          description: 'Snapshot name to restore (as `qm listsnapshot` shows it). Default "init".',
         },
         confirm: {
           type: 'boolean',
           description:
-            'Must be true. Present so a model cannot roll back a VM as a side effect of a broader task; the ' +
-            'result always states which snapshot was restored.',
+            'Must be true. Rolling back destroys the current VM state; without it the call is refused ' +
+            'with SNAPSHOT_CONFIRM_REQUIRED.',
         },
         timeoutMs: {
           type: 'number',
-          description: 'How long to wait for the guest agent after boot, ms (default 180000, i.e. 3 min).',
+          description: 'How long to wait for the guest agent after boot, milliseconds (default 180000).',
         },
       },
       output: {
         schema: schema({
-          vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the rollback ran on.' },
-          snapshot: { type: 'string', description: 'Snapshot that was restored.' },
-          rollback_ms: { type: 'number', description: 'Time of qm rollback.' },
-          stop_ms: { type: 'number', description: 'Time to reach the stopped state (0 when already stopped).' },
-          start_ms: { type: 'number', description: 'Time of qm start.' },
-          agent_up_ms: { type: 'number', description: 'Time from qm start until the guest agent answered.' },
-          previous_status: { type: 'string', description: 'Power state before the rollback.' },
-          snapshots: { type: 'array', items: { type: 'string' }, description: 'Snapshots that exist on the VM.' },
-          wall_ms: { type: 'number', description: 'Total wall time.' },
+          vmid: { type: 'number', description: 'VM that was rolled back.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
+          node: { type: 'string', description: 'PVE node name.' },
+          snapshot: { type: 'string', description: 'The snapshot that was restored (state is destroyed to it).' },
+          previous_status: { type: 'string', description: 'The VM status before the rollback.' },
+          rollback_ms: { type: 'number', description: 'Duration of `qm rollback`, milliseconds.' },
+          stop_ms: { type: 'number', description: 'Duration of the stop phase, milliseconds (0 when already stopped).' },
+          start_ms: { type: 'number', description: 'Duration of `qm start`, milliseconds.' },
+          agent_up_ms: { type: 'number', description: 'Milliseconds from `qm start` until the agent answered.' },
+          snapshots: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Snapshot names the VM had before the rollback.',
+          },
+          wall_ms: { type: 'number', description: 'Wall time of the whole call, milliseconds.' },
         }),
         render: textRender('Snapshot restored', (value) =>
           [
-            `VM ${value.vmid} on ${value.node} rolled back to "${value.snapshot}" and booted.`,
-            `rollback ${seconds(value.rollback_ms)}; guest agent up ${seconds(value.agent_up_ms)} after start`,
-            `other snapshots: ${(value.snapshots ?? []).filter((name) => name !== value.snapshot).join(', ') || '(none)'}`,
-            `total ${seconds(value.wall_ms)}`,
+            `rolled back VM ${value.vmid} on ${value.node ?? value.host} to snapshot "${value.snapshot}" and booted it.`,
+            `rollback ${seconds(value.rollback_ms)}` +
+              (value.stop_ms ? `; stop ${seconds(value.stop_ms)}` : '') +
+              `; guest agent up ${seconds(value.agent_up_ms)} after start` +
+              `; total ${seconds(value.wall_ms)}`,
+            value.snapshots?.length ? `other snapshots: ${value.snapshots.join(', ')}` : 'other snapshots: none',
           ].join('\n'),
         ),
       },
-      timeoutMs: 420000,
       async execute(args, exec) {
-        return guard(async () => {
-          if (args.confirm !== true) {
-            throw new VmError(
-              'SNAPSHOT_CONFIRM_REQUIRED',
-              'rollback discards the current disk state, so this call needs confirm:true',
-            );
-          }
-          const started = Date.now();
-          const settings = deps.settings();
-          const vmid = deps.registry.assertVmid(args.vmid);
-          const name = String(args.snapshot ?? 'init').trim();
-          if (!SNAPSHOT_NAME.test(name)) throw new VmError('BAD_ARGS', `invalid snapshot name "${name}"`);
-          const waitMs = Math.max(30000, Math.min(900000, Number(args.timeoutMs ?? 180000)));
-          const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal });
-          const node = resolved.node;
-          const list = await deps.transport.run(node, `qm listsnapshot ${vmid}`, {
-            timeoutMs: 30000,
-            allowNonZero: true,
-            signal: exec?.signal,
+        if (args.confirm !== true) {
+          throw new VmError(
+            'SNAPSHOT_CONFIRM_REQUIRED',
+            'a rollback destroys the current VM state and was not confirmed',
+          );
+        }
+        const name = String(args.snapshot ?? 'init').trim();
+        if (!SNAPSHOT_NAME.test(name)) {
+          throw new VmError('BAD_ARGS', `snapshot name ${JSON.stringify(name)} is not a valid snapshot name`);
+        }
+        const signal = exec.signal;
+        const started = Date.now();
+        const timeoutMs = Math.max(60000, Number(args.timeoutMs ?? 180000));
+        const resolved = await target(deps, args, exec);
+        const { vmid, host, node } = resolved;
+
+        const listing = await deps.transport.run(host, `qm listsnapshot ${vmid} 2>&1`, {
+          timeoutMs: 20000,
+          signal,
+          allowNonZero: true,
+        });
+        const snapshots = parseSnapshots(listing.stdout);
+        if (!snapshots.includes(name)) {
+          throw new VmError('SNAPSHOT_NOT_FOUND', `VM ${vmid} has no snapshot "${name}"`, {
+            snapshot: name,
+            snapshots,
           });
-          const snapshots = parseSnapshots(list.stdout);
-          if (snapshots.length > 0 && !snapshots.includes(name)) {
-            throw new VmError(
-              'SNAPSHOT_NOT_FOUND',
-              `VM ${vmid} has no snapshot "${name}"; it has: ${snapshots.join(', ')}`,
-            );
+        }
+
+        // A recorder would keep opening QMP sockets across the stop/rollback and fail frame after
+        // frame; it is stopped first and reported in the result.
+        const paths = remotePaths(deps.settings(), vmid);
+        await deps.stopBurst(host, vmid, paths).catch(() => null);
+
+        const previous = await queryVmStatus(deps.transport, host, vmid);
+        const previousStatus = previous.status ?? resolved.status;
+        let stopMs = 0;
+        if (previousStatus === 'running' || previousStatus === 'paused') {
+          const stopStarted = Date.now();
+          await deps.transport.run(host, `qm stop ${vmid} 2>&1`, { timeoutMs: 60000, signal });
+          const stopped = await waitFor(
+            async () => (await queryVmStatus(deps.transport, host, vmid)).status === 'stopped',
+            { timeoutMs: 90000, intervalMs: 1000, signal },
+          );
+          stopMs = Date.now() - stopStarted;
+          if (!stopped.ok) {
+            throw new VmError('VM_RUNNING', `VM ${vmid} did not stop within 90 s`, { vmid, stop_ms: stopMs });
           }
-          // A recorder holds the QMP socket and would fail mid-rollback: stop it first.
-          const paths = remotePaths(settings, vmid);
-          await deps.stopBurst?.(node, vmid, paths);
-          const previous = (await queryVmStatus(deps.transport, node, vmid)).status ?? 'unknown';
-          let stopMs = 0;
-          if (previous === 'running' || previous === 'paused') {
-            const stopStart = Date.now();
-            const stop = await deps.transport.run(node, `qm stop ${vmid}`, {
-              timeoutMs: 120000,
-              allowNonZero: true,
-              signal: exec?.signal,
-            });
-            if (stop.code !== 0) {
-              throw new VmError('VM_RUNNING', `qm stop failed: ${stop.stderr.trim().slice(0, 300) || stop.stdout.trim().slice(0, 300)}`);
-            }
-            const quiet = await waitFor(
-              async () => (await queryVmStatus(deps.transport, node, vmid)).status === 'stopped',
-              { timeoutMs: 120000, intervalMs: 500, signal: exec?.signal },
-            );
-            if (!quiet.ok) throw new VmError('VM_RUNNING', `VM ${vmid} did not reach the stopped state`);
-            stopMs = Date.now() - stopStart;
-          }
-          const rollbackStart = Date.now();
-          const rollback = await deps.transport.run(node, `qm rollback ${vmid} ${name}`, {
-            timeoutMs: 300000,
-            allowNonZero: true,
-            signal: exec?.signal,
-          });
-          const rollbackMs = Date.now() - rollbackStart;
-          if (rollback.code !== 0) {
-            const text = `${rollback.stderr}\n${rollback.stdout}`;
-            const code = /does not exist|no such|not found/i.test(text) ? 'SNAPSHOT_NOT_FOUND' : 'SSH_FAILED';
-            throw new VmError(code, `qm rollback failed: ${text.trim().split('\n').slice(-3).join(' ').slice(0, 300)}`);
-          }
-          const startStart = Date.now();
-          const start = await deps.transport.run(node, `qm start ${vmid}`, {
-            timeoutMs: 60000,
-            allowNonZero: true,
-            signal: exec?.signal,
-          });
-          const startMs = Date.now() - startStart;
-          if (start.code !== 0) {
-            throw new VmError('SSH_FAILED', `qm start failed: ${start.stderr.trim().slice(0, 300) || start.stdout.trim().slice(0, 300)}`);
-          }
-          // The guest-side session-1 bridge lives on disk: the rollback removed it.
-          deps.bridge?.reset(vmid);
-          const ready = await deps.registry.waitAgent(node, vmid, { timeoutMs: waitMs, signal: exec?.signal });
-          if (!ready.ok) {
-            throw new VmError('AGENT_TIMEOUT', `guest agent did not answer within ${Math.round(waitMs / 1000)} s of boot`, {
-              vmid,
-              node,
-              snapshot: name,
-              rollback_ms: rollbackMs,
-              start_ms: startMs,
-              previous_status: previous,
-            });
-          }
-          return {
-            ok: true,
+        }
+
+        const rollbackStarted = Date.now();
+        const rollback = await deps.transport.run(host, `qm rollback ${vmid} ${name} 2>&1`, {
+          timeoutMs: 300000,
+          signal,
+          allowNonZero: true,
+        });
+        const rollbackMs = Date.now() - rollbackStarted;
+        if (rollback.code !== 0) {
+          throw new VmError('SNAPSHOT_NOT_FOUND', `qm rollback ${vmid} ${name} failed: ${rollback.stdout.trim()}`, {
             vmid,
-            node,
             snapshot: name,
             rollback_ms: rollbackMs,
-            stop_ms: stopMs,
-            start_ms: startMs,
-            agent_up_ms: ready.ms,
-            previous_status: previous,
-            snapshots,
-            wall_ms: Date.now() - started,
-          };
+          });
+        }
+
+        const startStarted = Date.now();
+        const start = await deps.transport.run(host, `qm start ${vmid} 2>&1`, {
+          timeoutMs: 120000,
+          signal,
+          allowNonZero: true,
         });
+        const startMs = Date.now() - startStarted;
+        if (start.code !== 0 && !/already running/i.test(start.stdout)) {
+          throw new VmError('SSH_FAILED', `qm start ${vmid} failed: ${start.stdout.trim()}`, { vmid, start_ms: startMs });
+        }
+        // The VM was rebuilt from the snapshot: the session-1 bridge and the cached host mapping
+        // both describe a machine that no longer exists.
+        deps.bridge.reset(vmid);
+        deps.registry.clear();
+
+        const ready = await deps.registry.waitAgent(host, vmid, { timeoutMs, signal });
+        if (!ready.ok) {
+          throw new VmError('AGENT_TIMEOUT', `guest agent of VM ${vmid} did not answer within ${seconds(timeoutMs)}`, {
+            vmid,
+            snapshot: name,
+            rollback_ms: rollbackMs,
+            start_ms: startMs,
+            previous_status: previousStatus,
+          });
+        }
+        return {
+          ok: true,
+          vmid,
+          host,
+          node,
+          snapshot: name,
+          previous_status: previousStatus,
+          rollback_ms: rollbackMs,
+          stop_ms: stopMs,
+          start_ms: startMs,
+          agent_up_ms: ready.ms,
+          snapshots: snapshots.filter((entry) => entry !== name),
+          wall_ms: Date.now() - started,
+        };
       },
     }),
   ];

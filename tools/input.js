@@ -9,29 +9,29 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { clickScript, keyExpression, keyScript, typeScript } from '../lib/actions.js';
 import { VmError, guard } from '../lib/errors.js';
-import { agentPing, queryVmStatus } from '../lib/ssh.js';
-import { schema, textRender, seconds, VMID_PARAM } from './common.js';
+import { agentPing } from '../lib/ssh.js';
+import { NODE_PARAM, schema, textRender, seconds, target as resolveTarget, VMID_PARAM } from './common.js';
 
 /** Screen guards: the guest desktop is 1280x800, but a resized console can be larger. */
 const COORD_MAX = 8192;
 
 /**
- * Resolve the node and make sure the VM is running with a live agent.
+ * Resolve the VM and make sure it runs with a live agent: input reaches a session only through a
+ * running guest.
  * @param {object} deps plugin dependencies.
  * @param {object} args tool arguments.
  * @param {object|undefined} exec execution context.
- * @returns {Promise<{vmid:number, node:string}>} target.
+ * @returns {Promise<{vmid:number, host:string, node:string|null, status:string}>} target.
  */
-async function target(deps, args, exec) {
-  const vmid = deps.registry.assertVmid(args.vmid);
-  const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal });
-  const node = resolved.node;
-  const status = await queryVmStatus(deps.transport, node, vmid);
-  if (status.status !== 'running') throw new VmError('VM_STOPPED', `VM ${vmid} is ${status.status ?? 'unknown'} on ${node}`);
-  if (!(await agentPing(deps.transport, node, vmid))) {
-    throw new VmError('AGENT_DOWN', `guest agent of VM ${vmid} does not answer on ${node}`);
+async function liveTarget(deps, args, exec) {
+  const resolved = await resolveTarget(deps, args, exec);
+  if (resolved.status !== 'running') {
+    throw new VmError('VM_STOPPED', `VM ${resolved.vmid} is ${resolved.status} on ${resolved.host}`);
   }
-  return { vmid, node };
+  if (!(await agentPing(deps.transport, resolved.host, resolved.vmid))) {
+    throw new VmError('AGENT_DOWN', `guest agent of VM ${resolved.vmid} does not answer on ${resolved.host}`);
+  }
+  return resolved;
 }
 
 /**
@@ -50,6 +50,7 @@ export function inputTools(deps) {
         'click equals one page turn: injected events are batched by the input stack, so verify with a screenshot.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         x: { type: 'number', required: true, description: 'X in screen pixels (0 … 8191), measured on the screenshot.' },
         y: { type: 'number', required: true, description: 'Y in screen pixels (0 … 8191), measured on the screenshot.' },
         button: {
@@ -62,7 +63,8 @@ export function inputTools(deps) {
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the guest runs on.' },
+          node: { type: 'string', description: 'PVE node name the guest runs on.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
           x: { type: 'number', description: 'X that was clicked.' },
           y: { type: 'number', description: 'Y that was clicked.' },
           button: { type: 'string', description: 'Mouse button used.' },
@@ -83,11 +85,11 @@ export function inputTools(deps) {
           if (x < 0 || y < 0 || x > COORD_MAX || y > COORD_MAX) {
             throw new VmError('BAD_ARGS', `x and y must be within 0…${COORD_MAX}, got ${x},${y}`);
           }
-          const { vmid, node } = await target(deps, args, exec);
+          const { vmid, host, node } = await liveTarget(deps, args, exec);
           const button = args.button === 'right' || args.button === 'middle' ? args.button : 'left';
           const clicks = Math.max(1, Math.min(3, Math.round(Number(args.clicks ?? 1))));
           const result = await deps.bridge.run({
-            node,
+            node: host,
             vmid,
             body: clickScript({ x: Math.round(x), y: Math.round(y), button, clicks, doubleClick: clicks > 1 }),
             timeoutMs: 60000,
@@ -97,6 +99,7 @@ export function inputTools(deps) {
             ok: true,
             vmid,
             node,
+            host,
             x: Math.round(x),
             y: Math.round(y),
             button,
@@ -117,6 +120,7 @@ export function inputTools(deps) {
         'escaping them. Long text is typed in one batch: verify with a screenshot instead of assuming.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         text: { type: 'string', required: true, description: 'Text to type. Max 2000 characters.' },
         enter: { type: 'boolean', description: 'Press Enter after the text (default false).' },
         delayMs: {
@@ -127,7 +131,8 @@ export function inputTools(deps) {
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the guest runs on.' },
+          node: { type: 'string', description: 'PVE node name the guest runs on.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
           chars: { type: 'number', description: 'Characters typed.' },
           enter: { type: 'boolean', description: 'Enter was pressed afterwards.' },
           output: { type: 'string', description: 'Guest reply.' },
@@ -143,17 +148,17 @@ export function inputTools(deps) {
           const text = typeof args.text === 'string' ? args.text : '';
           if (text.length === 0) throw new VmError('BAD_ARGS', 'text is empty');
           if (text.length > 2000) throw new VmError('BAD_ARGS', 'text is longer than 2000 characters');
-          const { vmid, node } = await target(deps, args, exec);
+          const { vmid, host, node } = await liveTarget(deps, args, exec);
           const enter = args.enter === true;
           const delayMs = Math.max(0, Math.min(5000, Math.round(Number(args.delayMs ?? 120))));
           const result = await deps.bridge.run({
-            node,
+            node: host,
             vmid,
             body: typeScript({ text, enter, delayMs }),
             timeoutMs: 120000,
             signal: exec?.signal,
           });
-          return { ok: true, vmid, node, chars: [...text].length, enter, output: result.output, ms: result.ms };
+          return { ok: true, vmid, node, host, chars: [...text].length, enter, output: result.output, ms: result.ms };
         });
       },
     }),
@@ -167,6 +172,7 @@ export function inputTools(deps) {
         'control that ignores injected mouse clicks (checkboxes do that) — press space or tab instead.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         key: {
           type: 'string',
           required: true,
@@ -178,7 +184,8 @@ export function inputTools(deps) {
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the guest runs on.' },
+          node: { type: 'string', description: 'PVE node name the guest runs on.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
           expression: { type: 'string', description: 'SendKeys expression that was sent.' },
           repeat: { type: 'number', description: 'Presses performed.' },
           output: { type: 'string', description: 'Guest reply.' },
@@ -193,17 +200,17 @@ export function inputTools(deps) {
         return guard(async () => {
           const expression = keyExpression(args.key);
           if (expression.length === 0) throw new VmError('BAD_ARGS', 'key is empty');
-          const { vmid, node } = await target(deps, args, exec);
+          const { vmid, host, node } = await liveTarget(deps, args, exec);
           const repeat = Math.max(1, Math.min(50, Math.round(Number(args.repeat ?? 1))));
           const delayMs = Math.max(0, Math.min(5000, Math.round(Number(args.delayMs ?? 120))));
           const result = await deps.bridge.run({
-            node,
+            node: host,
             vmid,
             body: keyScript({ keys: expression, repeat, delayMs }),
             timeoutMs: 120000,
             signal: exec?.signal,
           });
-          return { ok: true, vmid, node, expression, repeat, output: result.output, ms: result.ms };
+          return { ok: true, vmid, node, host, expression, repeat, output: result.output, ms: result.ms };
         });
       },
     }),

@@ -13,8 +13,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { appendAudit } from '../lib/audit.js';
 import { VmError, guard, truncate } from '../lib/errors.js';
 import { encodeCommand, guestExec, MAX_ENCODED } from '../lib/guest.js';
-import { agentPing, queryVmStatus } from '../lib/ssh.js';
-import { schema, textRender, seconds, sessionCwd, VMID_PARAM } from './common.js';
+import { NODE_PARAM, schema, textRender, seconds, sessionCwd, target, VMID_PARAM } from './common.js';
 
 /**
  * Build the guest tools.
@@ -33,6 +32,7 @@ export function guestTools(deps) {
         'the click/type/key tools use.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         script: {
           type: 'string',
           required: true,
@@ -48,7 +48,8 @@ export function guestTools(deps) {
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the guest runs on.' },
+          node: { type: 'string', description: 'PVE node name the guest runs on.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
           stdout: { type: 'string', description: 'Standard output of the script (UTF-8, truncated at the configured limit).' },
           stderr: { type: 'string', description: 'Standard error, when the script wrote any.' },
           exit: { type: 'number', description: 'Exit code reported by the guest.' },
@@ -79,11 +80,9 @@ export function guestTools(deps) {
           const started = Date.now();
           const script = typeof args.script === 'string' ? args.script : '';
           if (script.trim().length === 0) throw new VmError('BAD_ARGS', 'script is empty');
-          const vmid = deps.registry.assertVmid(args.vmid);
-          const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal });
-          const node = resolved.node;
-          const status = await queryVmStatus(deps.transport, node, vmid);
-          if (status.status !== 'running') throw new VmError('VM_STOPPED', `VM ${vmid} is ${status.status ?? 'unknown'} on ${node}`);
+          const resolved = await target(deps, args, exec);
+          const { vmid, host, node, status } = resolved;
+          if (status !== 'running') throw new VmError('VM_STOPPED', `VM ${vmid} is ${status} on ${host}`);
           const timeoutMs = Math.max(5000, Math.min(600000, Math.round(Number(args.timeoutMs ?? settings.guestTimeoutMs))));
           const encoded = encodeCommand(script);
           if (encoded.length > MAX_ENCODED) {
@@ -95,12 +94,19 @@ export function guestTools(deps) {
           }
           let reply;
           try {
-            reply = await guestExec({ transport: deps.transport, node, vmid, script, timeoutMs, signal: exec?.signal });
+            reply = await guestExec({
+              transport: deps.transport,
+              node: host,
+              vmid,
+              script,
+              timeoutMs,
+              signal: exec?.signal,
+            });
           } catch (error) {
             const audited = await appendAudit(settings, sessionCwd(exec, deps.ctx), {
               tool: 'pve_guest_exec',
               vmid,
-              node,
+              node: host,
               script,
               error: error instanceof VmError ? `${error.code}: ${error.message}` : String(error),
               ms: Date.now() - started,
@@ -113,7 +119,7 @@ export function guestTools(deps) {
           const audited = await appendAudit(settings, sessionCwd(exec, deps.ctx), {
             tool: 'pve_guest_exec',
             vmid,
-            node,
+            node: host,
             script,
             exit: reply.exitcode,
             bytes: cut.bytes,
@@ -124,6 +130,7 @@ export function guestTools(deps) {
             ok: true,
             vmid,
             node,
+            host,
             stdout: cut.text,
             stderr: truncate(reply.stderr ?? '', 2048).text,
             exit: reply.exitcode,

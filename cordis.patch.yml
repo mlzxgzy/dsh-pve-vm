@@ -3,22 +3,12 @@
 # One plugin entry. `id` is the settings namespace (the settings card writes its
 # overrides to the profile patch layer by this id), `name` is the package name.
 #
-# The config below is the reference deployment this plugin was built against: one
-# lab node and one Windows VM. It is not a default you should inherit blindly —
-# `allowedVmids` is what makes the tools able to touch a VM at all, and
-# `allowGuestExec: true` exposes arbitrary PowerShell as SYSTEM inside the guest.
-# Set `allowGuestExec: false` to make pve_guest_exec disappear; the schema default
-# for every field is the safe one (no nodes, no VM ids, guest exec off), so a bare
-# insert with no config does nothing at all.
+# No host and no VM id is written here on purpose: this package must work on any
+# cluster. The tools take `node` (an ssh alias or an address) per call, read the
+# `hosts` setting, or pick up `PVE_HOSTS`; the node that owns the VM — and the VM
+# itself, when `vmid` is omitted — is discovered with `qm list` / `qm status` at
+# call time. Everything the schema defaults to is the safe side: no hosts, no vmid
+# limit, guest exec on (it is audited; set `allowGuestExec: false` to hide the tool).
 - insert:
     - id: pve-vm-recorder
       name: pve-vm-recorder
-      config:
-        nodes:
-          - 192.168.90.104
-        sshUser: root
-        allowedVmids:
-          - 15047
-        defaultVmid: 15047
-        tmpfsDir: /dev/shm/pve-rec
-        allowGuestExec: true

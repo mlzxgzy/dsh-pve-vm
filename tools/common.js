@@ -87,9 +87,40 @@ export function sessionCwd(exec, ctx) {
 export const VMID_PARAM = {
   type: 'number',
   description:
-    'Virtual machine id. Must be listed in the plugin setting `allowedVmids`; omit to use `defaultVmid`. ' +
-    'The node that hosts the VM is discovered at run time — never pass a node name here.',
+    'Virtual machine id. Omit to use `defaultVmid`, or — when that is 0 — the only running VM on the ' +
+    'known hosts. When several VMs run, the call fails with AMBIGUOUS_VMID and lists them.',
 };
+
+/** Common `node` parameter: a host, not a VM's owner (that is discovered). */
+export const NODE_PARAM = {
+  type: 'string',
+  description:
+    'PVE host to talk to: an ssh alias or an address, e.g. "pve04" or "192.168.90.104". Omit to use ' +
+    'the settings list or PVE_HOSTS. The node that actually owns the VM is found with `qm status`, ' +
+    'so this only has to be a host that can reach the cluster.',
+};
+
+/**
+ * Which VM, and which host, a call works on.
+ * @param {object} deps plugin wiring.
+ * @param {object} args tool arguments (`vmid`, `node`).
+ * @param {object} exec tool execution context.
+ * @returns {Promise<{vmid:number, source:string, host:string, node:string|null,
+ *   status:string, vm:object|undefined}>} the resolved target.
+ */
+export async function target(deps, args, exec) {
+  const signal = exec?.signal;
+  const picked = await deps.registry.pickVmid(args.vmid, { host: args.node, signal });
+  const resolved = await deps.registry.resolve(picked.vmid, { host: args.node, signal });
+  return {
+    vmid: picked.vmid,
+    source: picked.source,
+    host: resolved.host,
+    node: resolved.node,
+    status: resolved.status,
+    vm: picked.vm,
+  };
+}
 
 /** Format a duration for a human. */
 export function seconds(ms) {

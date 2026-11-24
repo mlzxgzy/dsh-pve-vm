@@ -13,9 +13,10 @@ import { burstStatus, startBurst, stopBurst } from '../lib/burst.js';
 import { localDir, remotePaths } from '../lib/config.js';
 import { VmError, guard } from '../lib/errors.js';
 import { fetchFrames, inlineImage } from '../lib/frames.js';
-import { parsePpm, writeFrame } from '../lib/img.js';
+import { blankness, parsePpm, writeFrame } from '../lib/img.js';
+import { clickScript } from '../lib/actions.js';
 import { queryVmStatus } from '../lib/ssh.js';
-import { schema, textRender, seconds, sessionCwd, VMID_PARAM } from './common.js';
+import { NODE_PARAM, schema, textRender, seconds, sessionCwd, target, VMID_PARAM } from './common.js';
 import { screendump } from '../lib/qmp.js';
 
 /** Largest base64 payload the `inline` option will add, bytes. */
@@ -35,14 +36,6 @@ function stamp() {
  * @returns {object[]} tool definitions.
  */
 export function screenTools(deps) {
-  const burstState = async (node, vmid) => {
-    const paths = remotePaths(deps.settings(), vmid);
-    return {
-      paths,
-      state: await burstStatus(deps.transport, node, { vmid, root: paths.root, burst: paths.burst }),
-    };
-  };
-
   return [
     defineTool({
       name: 'pve_screenshot',
@@ -53,6 +46,7 @@ export function screenTools(deps) {
         'burst is recording, because QMP serves one client.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         name: {
           type: 'string',
           description: 'File stem for the saved image (letters, digits, dash, underscore, dot). Defaults to a timestamp.',
@@ -72,11 +66,34 @@ export function screenTools(deps) {
             'Include the pixels as base64 in the result (only when the image is under 200 KB). Off by ' +
             'default: a 1280x800 frame as base64 costs ~90 KB of context.',
         },
+        wake: {
+          type: 'boolean',
+          description:
+            'When the frame comes out blank (a VM booted with nobody at the console sends nothing to the ' +
+            'VGA scanout), click once in the guest session and capture again. Default false.',
+        },
+        wakeX: {
+          type: 'number',
+          description: 'Screen x for the wake click, pixels (default 1150 — empty desktop on the right).',
+        },
+        wakeY: {
+          type: 'number',
+          description: 'Screen y for the wake click, pixels (default 620 — inside the desktop, above the taskbar).',
+        },
       },
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the frame came from.' },
+          node: { type: 'string', description: 'PVE node name the frame came from.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
+          blank: {
+            type: 'boolean',
+            description: 'The frame is a flat black or single-colour image: the desktop is not composing.',
+          },
+          woke: {
+            type: 'boolean',
+            description: 'The frame was blank and a wake click was sent before the second capture.',
+          },
           path: { type: 'string', description: 'Absolute path of the saved image (read it to see the screen).' },
           bytes: { type: 'number', description: 'Size of the saved image, bytes.' },
           w: { type: 'number', description: 'Frame width, pixels.' },
@@ -105,10 +122,14 @@ export function screenTools(deps) {
         return guard(async () => {
           const started = Date.now();
           const settings = deps.settings();
-          const vmid = deps.registry.assertVmid(args.vmid);
-          const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal });
-          const node = resolved.node;
-          const { paths, state } = await burstState(node, vmid);
+          const resolved = await target(deps, args, exec);
+          const { vmid } = resolved;
+          const paths = remotePaths(settings, vmid);
+          const state = await burstStatus(deps.transport, resolved.host, {
+            vmid,
+            root: paths.root,
+            burst: paths.burst,
+          });
           if (state.running) {
             // Do not queue and do not steal the socket: a recorder owns QMP until it stops.
             throw new VmError(
@@ -120,35 +141,64 @@ export function screenTools(deps) {
           }
           const format = args.format === 'png' ? 'png' : settings.frameFormat;
           const quality = Math.max(1, Math.min(10, Number(args.quality ?? settings.frameQuality)));
-          const remoteOut = `${paths.shots}/shot-${stamp()}.ppm`;
-          const shot = await screendump(deps.transport, node, {
-            vmid,
-            outFile: remoteOut,
-            qmpTimeoutMs: settings.qmpTimeoutMs,
-            signal: exec?.signal,
-            timeoutMs: 60000,
-          });
-          const image = parsePpm(shot.ppm);
-          const stem = typeof args.name === 'string' && args.name.length > 0 ? args.name.replace(/[^A-Za-z0-9._-]/g, '_') : `shot-${stamp()}`;
+          const stem =
+            typeof args.name === 'string' && args.name.length > 0
+              ? args.name.replace(/[^A-Za-z0-9._-]/g, '_')
+              : `shot-${stamp()}`;
           const outDir = localDir(settings, sessionCwd(exec, deps.ctx), `v${vmid}/shots`);
           const outPath = join(outDir, `${stem}.${format === 'jpeg' ? 'jpg' : 'png'}`);
-          const written = await writeFrame(image, {
-            outPath,
-            format,
-            quality,
-            spawn: deps.spawn,
-            cwd: deps.cwd,
-          });
+          const capture = async () => {
+            const remoteOut = `${paths.shots}/shot-${stamp()}.ppm`;
+            const shot = await screendump(deps.transport, resolved.host, {
+              vmid,
+              outFile: remoteOut,
+              qmpTimeoutMs: settings.qmpTimeoutMs,
+              signal: exec?.signal,
+              timeoutMs: 60000,
+            });
+            const image = parsePpm(shot.ppm);
+            const written = await writeFrame(image, {
+              outPath,
+              format,
+              quality,
+              spawn: deps.spawn,
+              cwd: deps.cwd,
+            });
+            return { shot, written, blank: blankness(image).blank };
+          };
+          let result = await capture();
+          let woke = false;
+          if (args.wake === true && result.blank === true && resolved.status === 'running') {
+            // A VM restored from a snapshot and booted with nobody at the console composes nothing, so
+            // QMP returns a flat frame until a real session-1 input arrives (measured: 12,203 bytes
+            // black vs 113,064 bytes with the desktop).
+            const x = Math.max(0, Math.min(8191, Math.round(Number(args.wakeX ?? 1150))));
+            const y = Math.max(0, Math.min(8191, Math.round(Number(args.wakeY ?? 620))));
+            await deps.bridge.run({
+              node: resolved.host,
+              vmid,
+              body: clickScript({ x, y }),
+              timeoutMs: 60000,
+              signal: exec?.signal,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 900));
+            result = await capture();
+            woke = true;
+          }
+          const { shot, written } = result;
           const value = {
             ok: true,
             vmid,
-            node,
+            node: resolved.node,
+            host: resolved.host,
             path: written.path,
             bytes: written.bytes,
             w: written.width,
             h: written.height,
             format: written.format,
             encoder: written.encoder,
+            blank: result.blank,
+            ...(woke ? { woke: true } : {}),
             ms: shot.ms,
             wall_ms: Date.now() - started,
           };
@@ -176,6 +226,7 @@ export function screenTools(deps) {
         'QMP_BUSY.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         action: {
           type: 'string',
           enum: ['start', 'stop', 'status'],
@@ -197,7 +248,8 @@ export function screenTools(deps) {
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the recorder runs on.' },
+          node: { type: 'string', description: 'PVE node name the recorder runs on.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
           action: { type: 'string', description: 'Action that was performed.' },
           dir: { type: 'string', description: 'Remote directory holding the frames.' },
           local: { type: 'string', description: 'Local directory pve_fetch_frames will write to.' },
@@ -236,18 +288,18 @@ export function screenTools(deps) {
       async execute(args, exec) {
         return guard(async () => {
           const settings = deps.settings();
-          const vmid = deps.registry.assertVmid(args.vmid);
           const action = args.action === 'stop' || args.action === 'status' ? args.action : 'start';
-          const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal });
-          const node = resolved.node;
+          const resolved = await target(deps, args, exec);
+          const { vmid, host } = resolved;
           const paths = remotePaths(settings, vmid);
           const local = localDir(settings, sessionCwd(exec, deps.ctx), `v${vmid}/frames`);
-          const status = await burstStatus(deps.transport, node, { vmid, root: paths.root, burst: paths.burst });
+          const status = await burstStatus(deps.transport, host, { vmid, root: paths.root, burst: paths.burst });
           if (action === 'status') {
             return {
               ok: true,
               vmid,
-              node,
+              node: resolved.node,
+              host,
               action,
               dir: paths.burst,
               local,
@@ -259,11 +311,12 @@ export function screenTools(deps) {
             };
           }
           if (action === 'stop') {
-            const stopped = await stopBurst(deps.transport, node, { vmid, root: paths.root, burst: paths.burst });
+            const stopped = await stopBurst(deps.transport, host, { vmid, root: paths.root, burst: paths.burst });
             return {
               ok: true,
               vmid,
-              node,
+              node: resolved.node,
+              host,
               action,
               dir: paths.burst,
               local,
@@ -274,15 +327,16 @@ export function screenTools(deps) {
               running: false,
             };
           }
-          const vm = await queryVmStatus(deps.transport, node, vmid);
+          const vm = await queryVmStatus(deps.transport, host, vmid);
           if (vm.status !== 'running') {
-            throw new VmError('VM_STOPPED', `VM ${vmid} is ${vm.status ?? 'unknown'} on ${node}`);
+            throw new VmError('VM_STOPPED', `VM ${vmid} is ${vm.status ?? 'unknown'} on ${host}`);
           }
           if (status.running) {
             return {
               ok: true,
               vmid,
-              node,
+              node: resolved.node,
+              host,
               action,
               dir: paths.burst,
               local,
@@ -296,7 +350,7 @@ export function screenTools(deps) {
           }
           const fps = Math.max(1, Math.min(15, Math.round(Number(args.fps ?? 4))));
           const seconds = Math.max(1, Math.min(settings.burstMaxSeconds, Math.round(Number(args.seconds ?? 20))));
-          const started = await startBurst(deps.transport, node, {
+          const started = await startBurst(deps.transport, host, {
             vmid,
             root: paths.root,
             burst: paths.burst,
@@ -307,11 +361,12 @@ export function screenTools(deps) {
           });
           // Give the recorder a moment to write its first frames, so `frames` is not always 0.
           await new Promise((resolve) => setTimeout(resolve, 700));
-          const after = await burstStatus(deps.transport, node, { vmid, root: paths.root, burst: paths.burst });
+          const after = await burstStatus(deps.transport, host, { vmid, root: paths.root, burst: paths.burst });
           return {
             ok: true,
             vmid,
-            node,
+            node: resolved.node,
+            host,
             action,
             dir: paths.burst,
             local,
@@ -335,6 +390,7 @@ export function screenTools(deps) {
         'whether the sequence was contiguous, so a bad recording is visible without opening the frames.',
       parameters: {
         vmid: VMID_PARAM,
+        node: NODE_PARAM,
         from: { type: 'number', description: 'First frame index to fetch (inclusive, default 0).' },
         to: { type: 'number', description: 'Last frame index to fetch (inclusive, default all recorded).' },
         max: {
@@ -351,7 +407,8 @@ export function screenTools(deps) {
       output: {
         schema: schema({
           vmid: { type: 'number', description: 'VM id.' },
-          node: { type: 'string', description: 'Node the frames came from.' },
+          node: { type: 'string', description: 'PVE node name the frames came from.' },
+          host: { type: 'string', description: 'ssh host that owns the VM.' },
           dir: { type: 'string', description: 'Local directory holding the converted frames.' },
           count: { type: 'number', description: 'Frames written by this call.' },
           format: { type: 'string', description: 'Image format written.' },
@@ -386,9 +443,8 @@ export function screenTools(deps) {
       async execute(args, exec) {
         return guard(async () => {
           const settings = deps.settings();
-          const vmid = deps.registry.assertVmid(args.vmid);
-          const resolved = await deps.registry.resolve(vmid, { signal: exec?.signal });
-          const node = resolved.node;
+          const resolved = await target(deps, args, exec);
+          const { vmid, host } = resolved;
           const paths = remotePaths(settings, vmid);
           const from = Math.max(0, Math.round(Number(args.from ?? 0)));
           const to = Math.max(from, Math.round(Number(args.to ?? 99999)));
@@ -398,7 +454,7 @@ export function screenTools(deps) {
           const outDir = localDir(settings, sessionCwd(exec, deps.ctx), `v${vmid}/frames`);
           const value = await fetchFrames({
             transport: deps.transport,
-            node,
+            node: host,
             vmid,
             burstDir: paths.burst,
             localDir: outDir,
@@ -412,7 +468,7 @@ export function screenTools(deps) {
             signal: exec?.signal,
             timeoutMs: 540000,
           });
-          return { ...value, node, wall_ms: value.ms };
+          return { ...value, node: resolved.node, host, wall_ms: value.ms };
         });
       },
     }),
